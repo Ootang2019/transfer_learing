@@ -144,7 +144,7 @@ class ContinuousAction(ROSActionType):
         self,
         env: "AbstractEnv",
         robot_id: str = "0",
-        dbg_act: bool = False,
+        DBG_ACT: bool = False,
         name_space: str = "machine_0",
         max_thrust: float = 0.5,  # [%]
         act_noise_stdv: float = 0.05,
@@ -156,7 +156,7 @@ class ContinuousAction(ROSActionType):
             name_space=name_space,
             **kwargs,
         )
-        self.dbg_act = dbg_act
+        self.dbg_act = DBG_ACT
 
         self.act_dim = 4
         self.act_range = self.ACTION_RANGE

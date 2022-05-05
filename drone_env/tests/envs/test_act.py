@@ -24,9 +24,7 @@ def test_continuous_action():
     action = 0.457 * np.ones(action_type.act_dim)
     action_type.act(action)
 
-    t = 0
-    while t < 100:
-        t += 1
+    for i in range(100):
         rospy.sleep(0.1)
 
 
@@ -51,9 +49,7 @@ def test_continuous_differential_action():
         config=config,
     )
     action = 0.1 * np.ones(action_type.act_dim)
-    t = 0
-    while t < 100:
-        t += 1
+    for i in range(100):
         action_type.act(action)
         rospy.sleep(0.05)
 

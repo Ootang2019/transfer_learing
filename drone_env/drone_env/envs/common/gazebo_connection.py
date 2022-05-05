@@ -20,9 +20,9 @@ class GazeboConnection:
     def __init__(self, start_init_physics_parameters=True, reset_world_or_sim="WORLD"):
         rospy.loginfo("GazeboConnection Initializing ...")
 
-        self._max_update_rate = Float64(400.0)
+        self._max_update_rate = Float64(1000.0)
         self._ode_config = ODEPhysics()
-        self._time_step = Float64(0.005)  # 0.001
+        self._time_step = Float64(0.005)  # 0.001, 0.005
 
         self.delete = rospy.ServiceProxy("gazebo/delete_model", DeleteModel)
         self.spawn = rospy.ServiceProxy("gazebo/spawn_urdf_model", SpawnModel)
@@ -150,8 +150,8 @@ class GazeboConnection:
 
         self._ode_config.auto_disable_bodies = False
         self._ode_config.sor_pgs_precon_iters = 0
-        self._ode_config.sor_pgs_iters = 200  # 50
-        self._ode_config.sor_pgs_w = 1.9  # 1.3
+        self._ode_config.sor_pgs_iters = 50  # 50, 200
+        self._ode_config.sor_pgs_w = 1.3  # 1.3, 1.9
         self._ode_config.sor_pgs_rms_error_tol = 0.0
         self._ode_config.contact_surface_layer = 0.001
         self._ode_config.contact_max_correcting_vel = 100  # 0.0

@@ -126,7 +126,7 @@ class ROSObservation(ObservationType):
 
         if self.dbg_ros:
             self.ros_cnt += 1
-            if self.ros_cnt % 10 == 0:
+            if self.ros_cnt % 1 == 0:
                 print(
                     "[ KinematicObservation ] imu_callback: linear_acceleration",
                     self.acc_data,
@@ -231,15 +231,36 @@ class ROSObservation(ObservationType):
 class KinematicsObservation(ROSObservation):
     """kinematic observation with actuator feedback"""
 
-    OBS = ["ori_diff", "ang_vel_diff", "pos_diff", "vel_diff", "vel", "acc"]
-    OBS_DIM = 17
+    OBS = [
+        "ori_diff",  # 4
+        "angvel_diff",  # 3
+        "pos_diff",  # 3
+        "vel_diff",  # 1
+        "ori",  # 4
+        "angvel",  # 3
+        "pos",  # 3
+        "vel",  # 3
+        "acc",  # 3
+        "goal_ori",  # 4
+        "goal_angvel",  # 3
+        "goal_pos",  # 3
+        "goal_vel",  # 1
+    ]
+    OBS_DIM = 38
     OBS_RANGE = {
         "ori_diff": [-1, 1],
-        "ang_vel_diff": [-50, 50],
+        "angvel_diff": [-50, 50],
         "pos_diff": [-50, 50],
         "vel_diff": [-50, 50],
+        "ori": [-1, 1],
+        "angvel": [-50, 50],
+        "pos": [-50, 50],
         "vel": [-50, 50],
         "acc": [-50, 50],
+        "goal_ori": [-1, 1],
+        "goal_angvel": [-50, 50],
+        "goal_pos": [-50, 50],
+        "goal_vel": [-50, 50],
     }
 
     def __init__(
@@ -289,8 +310,8 @@ class KinematicsObservation(ROSObservation):
         proc_df = pd.DataFrame.from_records([processed_dict])
         processed = np.hstack(proc_df[self.obs_name].values[0])
 
-        obs_dict.update({"proc_dict": processed_dict})
         obs_dict.update({"goal_dict": goal_dict})
+        obs_dict.update({"proc_dict": processed_dict})
 
         if self.dbg_obs:
             print("[ observation ] state", processed)
@@ -325,11 +346,18 @@ class KinematicsObservation(ROSObservation):
 
         state_dict = {
             "ori_diff": obs_ori - goal_ori,
-            "vel_diff": np.linalg.norm(obs_vel) - goal_vel,
-            "ang_vel_diff": obs_angvel - goal_angvel,
+            "angvel_diff": obs_angvel - goal_angvel,
             "pos_diff": obs_pos - goal_pos,
+            "vel_diff": np.linalg.norm(obs_vel) - goal_vel,
+            "ori": obs_ori,
+            "angvel": obs_angvel,
+            "pos": obs_pos,
             "vel": obs_vel,
             "acc": obs_acc,
+            "goal_ori": goal_ori,
+            "goal_angvel": goal_angvel,
+            "goal_pos": goal_pos,
+            "goal_vel": goal_vel,
         }
 
         if scale_obs:

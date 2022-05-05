@@ -2,7 +2,7 @@
 """ environment abstract """
 from __future__ import absolute_import, division, print_function
 
-import os
+import os, sys
 import socket
 import time
 from copy import deepcopy
@@ -21,7 +21,6 @@ from drone_env.envs.common.utils import update_dict
 from drone_env.envs.script.drone_script import (
     spawn_simulation_on_different_port,
     kill_screens,
-    kill_rosnode,
 )
 from gym.utils import seeding
 
@@ -30,7 +29,7 @@ Target = Union[np.ndarray, float]
 
 
 class AbstractEnv(gym.Env):
-    """generic blimp env"""
+    """generic env"""
 
     def __init__(self, config: Optional[Dict[Any, Any]] = None) -> None:
         self.config = self.default_config()
@@ -155,17 +154,13 @@ class ROSAbstractEnv(AbstractEnv):
                     "ros_ip": "localhost",
                     "ros_port": 11311,
                     "gaz_port": 11351,
+                    "env_wake_time": 35,
                     "gui": False,
                     "enable_meshes": False,
                     "world": "basic",
                     "auto_start_simulation": True,
-                    "remote_host_name": "frg07",
                     "maximum_local_worker": 8,
-                    "enable_wind": False,
-                    "enable_wind_sampling": False,  # sample random wind speed and direction
-                    "wind_speed": 1.5,  # initial wind speed
-                    "wind_direction": (1, 0),  # initial wind in x and y direction
-                    "position": (0, 0, 100),  # initial spawned position
+                    "position": (0, 0, 25),  # initial spawned position
                 },
                 "observation": {
                     "type": "PlanarKinematics",
@@ -175,24 +170,22 @@ class ROSAbstractEnv(AbstractEnv):
                     "DBG_OBS": False,
                 },
                 "action": {
-                    "type": "SimpleContinuousDifferentialAction",
+                    "type": "ContinuousAction",
                     "robot_id": "0",
                     "name_space": "machine_",
-                    "flightmode": 3,
                     "DBG_ACT": False,
                 },
                 "target": {
-                    "type": "InteractiveGoal",
+                    "type": "RandomGoal",
                     "target_name_space": "goal_",
                     "robot_id": "0",
                     "ros_port": 11311,
                     "gaz_port": 11351,
-                    "DBG_ROS": False,
                 },
                 "seed": 123,
-                "simulation_frequency": 30,
-                "policy_frequency": 6,
-                "duration": 1200,
+                "simulation_frequency": 100,
+                "policy_frequency": 50,
+                "duration": 3000,
             }
         )
 
@@ -241,11 +234,6 @@ class ROSAbstractEnv(AbstractEnv):
         self.define_spaces()
         self._create_pub_and_sub()
         self._pub_and_sub = True
-
-        if self.config["simulation"]["enable_wind_sampling"]:
-            from rotors_comm.msg import WindSpeed
-
-            self.wind_state = WindSpeed()
 
         if not self.real_exp:
             self.gaz.unpause_sim()
@@ -301,7 +289,7 @@ class ROSAbstractEnv(AbstractEnv):
         )
 
         time.sleep(
-            35 * int(worker_index)
+            self.config["simulation"]["env_wake_time"] * int(worker_index)
         )  # spawn at different time increase spawn stability
         ros_port = self.config["simulation"]["ros_port"] + worker_index
         gaz_port = self.config["simulation"]["gaz_port"] + worker_index
@@ -321,16 +309,13 @@ class ROSAbstractEnv(AbstractEnv):
             {"ros_ip": ros_ip, "ros_port": ros_port, "gaz_port": gaz_port}
         )
 
-        self._spawn_sim(marvin)
+        self._spawn_sim()
 
-    def _spawn_sim(self, marvin=False):
-        if marvin:
-            spawn_simulation_on_marvin(**self.config["simulation"])
-        else:
-            spawn_simulation_on_different_port(**self.config["simulation"])
+    def _spawn_sim(self):
+        spawn_simulation_on_different_port(**self.config["simulation"])
 
     def _create_pub_and_sub(self):
-        time.sleep(1)
+        pass
 
     def reset(self) -> Observation:
         self.steps = 0
@@ -356,7 +341,7 @@ class ROSAbstractEnv(AbstractEnv):
         self.gaz.pause_sim()
 
     def _reset_joint_and_check_sys(self):
-        self.controllers_object.reset_blimp_joint_controllers()
+        self.controllers_object.reset_drone_joint_controllers()
         self.action_type.set_init_pose()
         self.observation_type.check_connection()
         self.target_type.check_connection()
@@ -421,3 +406,4 @@ class ROSAbstractEnv(AbstractEnv):
         rospy.signal_shutdown("Closing RobotGazeboEnvironment")
         kill_reply = kill_screens(int(self.config["robot_id"]))
         print("kill screen reply:", kill_reply)
+        sys.exit(1)

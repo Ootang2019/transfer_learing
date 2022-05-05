@@ -1,7 +1,7 @@
 from drone_env.envs.common.abstract import AbstractEnv
 import pytest
 from drone_env.envs.common.gazebo_connection import GazeboConnection
-from drone_env.envs.common.observation import observation_factory
+from drone_env.envs.common.target import target_factory
 import copy
 import numpy as np
 import rospy
@@ -26,9 +26,9 @@ class mock_env:
         }
 
 
-def test_kinematics_observation():
+def test_random_goal():
     rospy.init_node(
-        "test_obs",
+        "test_target",
         anonymous=True,
         disable_signals=True,
     )
@@ -36,30 +36,20 @@ def test_kinematics_observation():
     GazeboConnection().reset_sim()
     GazeboConnection().unpause_sim()
 
-    config = {"type": "Kinematics", "DBG_OBS": False, "DBG_ROS": True}
-    observation_type = observation_factory(env=mock_env(), config=config)
-
-    for i in range(100):
-        observation_type.observe()
-        rospy.sleep(0.1)
-
-
-def test_planar_kinematics_observation():
-    rospy.init_node(
-        "test_obs",
-        anonymous=True,
-        disable_signals=True,
+    config = {"type": "RandomGoal"}
+    target_type = target_factory(env=mock_env(), config=config)
+    target_type.sample_new_goal(
+        min_dist_to_origin=5,
+        range_dict=dict(
+            x_range=(-10, 10),
+            y_range=(-10, 10),
+        ),
     )
 
-    GazeboConnection().reset_sim()
-    GazeboConnection().unpause_sim()
-
-    config = {"type": "PlanarKinematics", "DBG_OBS": True, "DBG_ROS": False}
-    observation_type = observation_factory(env=mock_env(), config=config)
-
-    for i in range(100):
-        observation_type.observe()
+    for _ in range(100):
+        target = target_type.sample()
+        print(target)
         rospy.sleep(0.1)
 
 
-test_kinematics_observation()
+test_random_goal()

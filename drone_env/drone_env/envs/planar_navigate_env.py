@@ -141,7 +141,7 @@ class PlanarNavigateEnv(ROSAbstractEnv):
             "terminal": terminal,
         }
 
-        self._update_goal_and_env()
+        self._update_goal_and_env(obs_info)
         self._step_info(info)
 
         return obs, reward, terminal, info
@@ -205,9 +205,9 @@ class PlanarNavigateEnv(ROSAbstractEnv):
         obs, _ = self.observation_type.observe()
         return obs
 
-    def _update_goal_and_env(self):
+    def _update_goal_and_env(self, obs_info):
         """update goal and env state"""
-        self.goal = self.target_type.sample()
+        self.goal = self.target_type.sample(obs_info)
 
         if (
             self.config["simulation"]["enable_wind"]

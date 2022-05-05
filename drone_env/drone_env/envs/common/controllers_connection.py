@@ -81,15 +81,8 @@ class ControllersConnection:
 
     #     self.reset_controllers(controllers_reset)
 
-    def reset_blimp_joint_controllers(self):
-        """reset blimp PID controllers"""
-        controllers_reset = [
-            "revolute_joint_state_controller",
-            "topfin_joint_position_controller",
-            "botfin_joint_position_controller",
-            "leftfin_joint_position_controller",
-            "rightfin_joint_position_controller",
-            "stick_joint_position_controller",
-        ]
+    def reset_drone_joint_controllers(self):
+        """reset drone PID controllers"""
+        controllers_reset = []
 
         self.reset_controllers(controllers_reset)
