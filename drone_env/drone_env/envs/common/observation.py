@@ -59,19 +59,19 @@ class ROSObservation(ObservationType):
         self.dbg_obs = DBG_OBS
         self.real_exp = real_experiment
         self.imu_namespace = (
-            self.name_space + "/ground_truth/imu"
+            self.name_space + "/imu"
             if self.real_exp
-            else self.name_space + "/imu"
+            else self.name_space + "/ground_truth/imu"
         )
         self.pose_namespace = (
-            self.name_space + "/ground_truth/pose"
+            self.name_space + "/pose"
             if self.real_exp
-            else self.name_space + "/pose"
+            else self.name_space + "/ground_truth/pose"
         )
         self.odo_namespace = (
-            self.name_space + "/ground_truth/odometry"
+            self.name_space + "/odometry"
             if self.real_exp
-            else self.name_space + "/odometry"
+            else self.name_space + "/ground_truth/odometry"
         )
 
         self.pos_data = np.array([0, 0, 0])
@@ -106,7 +106,7 @@ class ROSObservation(ObservationType):
     def _create_pub_and_sub(self):
         rospy.Subscriber(self.imu_namespace, Imu, self._imu_callback)
         rospy.Subscriber(self.pose_namespace, Pose, self._pose_callback)
-        time.sleep(1)
+        time.sleep(0.1)
 
     def _imu_callback(self, msg):
         """imu msg callback
@@ -117,16 +117,16 @@ class ROSObservation(ObservationType):
         self.ang_vel_data = utils.obj2array(msg.angular_velocity)
 
         acc = utils.obj2array(msg.linear_acceleration)
-        # if self.real_exp:
-        #     acc[2] += GRAVITY
-        # else:
-        #     acc[2] -= GRAVITY
+        if self.real_exp:
+            acc[2] += GRAVITY
+        else:
+            acc[2] -= GRAVITY
 
         self.acc_data = self.to_NED(acc)
 
         if self.dbg_ros:
             self.ros_cnt += 1
-            if self.ros_cnt % 100 == 0:
+            if self.ros_cnt % 10 == 0:
                 print(
                     "[ KinematicObservation ] imu_callback: linear_acceleration",
                     self.acc_data,

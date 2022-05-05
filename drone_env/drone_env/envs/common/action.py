@@ -72,7 +72,7 @@ class ROSActionType(ActionType):
 
         self.robot_id = robot_id
         self.name_space = name_space
-        self.actuator_name_space = self.name_space + "command/motor_speed"
+        self.actuator_name_space = self.name_space + "/command/motor_speed"
 
         self.act_dim = 4
         self.cur_act = self.init_act = np.zeros(self.act_dim)
@@ -83,7 +83,7 @@ class ROSActionType(ActionType):
         self.action_publisher = rospy.Publisher(
             self.actuator_name_space, Actuators, queue_size=1
         )
-        time.sleep(1)
+        time.sleep(0.1)
 
     def check_publishers_connection(self) -> None:
         """check actuator publisher connections"""
@@ -146,6 +146,7 @@ class ContinuousAction(ROSActionType):
         robot_id: str = "0",
         dbg_act: bool = False,
         name_space: str = "machine_0",
+        max_thrust: float = 0.5,  # [%]
         act_noise_stdv: float = 0.05,
         **kwargs,  # pylint: disable=unused-argument
     ) -> None:
@@ -160,6 +161,7 @@ class ContinuousAction(ROSActionType):
         self.act_dim = 4
         self.act_range = self.ACTION_RANGE
         self.act_noise_stdv = act_noise_stdv
+        self.max_thrust = max_thrust
 
         self.cur_act = self.init_act = np.zeros(self.act_dim)
 
@@ -179,9 +181,9 @@ class ContinuousAction(ROSActionType):
         Returns:
             [np.array]: formated action with 4 channels
         """
-        proc = action + np.random.normal(0, noise_stdv, action.shape)
+        action += np.random.normal(0, noise_stdv, action.shape)
+        proc = np.clip(action, 0, self.max_thrust)
         proc = utils.lmap(proc, [-1, 1], self.act_range)
-        proc = np.clip(proc, -1, 1)
         proc = proc.reshape(self.act_dim, 1)
         return proc
 
@@ -236,20 +238,17 @@ class ContinuousDifferentialAction(ContinuousAction):
     3: m3
     """
 
-    DIFF_ACT_SCALE = np.array([0.5, 0.5, 0.5, 0.5])
+    DIFF_ACT_SCALE = np.array([0.05, 0.05, 0.05, 0.05])
     ACT_DIM = 4
 
     def __init__(
         self,
         env: "AbstractEnv",
-        max_thrust: float = 0.5,
         **kwargs: dict,
     ) -> None:
         super().__init__(env, **kwargs)
         self.act_dim = self.ACT_DIM
         self.diff_act_scale = self.DIFF_ACT_SCALE
-
-        self.max_thrust = max_thrust
 
         self.init_act = np.zeros(self.act_dim)
         self.cur_act = np.zeros(self.act_dim)
@@ -293,8 +292,6 @@ class ContinuousDifferentialAction(ContinuousAction):
             [np.array]: actuator state (4,) in [-1,1]
         """
         cur_act += self.diff_act_scale * action
-        cur_act = np.clip(cur_act, -1, 1)
-        cur_act = np.clip(cur_act, 0, self.max_thrust)
 
         return cur_act
 
@@ -311,7 +308,7 @@ class ContinuousDifferentialAction(ContinuousAction):
             [type]: processed actuator state [-1000, 1000] with shape (4,1)
         """
         proc = act_state + np.random.normal(0, noise_level, act_state.shape)
-        proc = np.clip(proc, -1, 1)
+        proc = np.clip(proc, 0, self.max_thrust)
         proc = utils.lmap(proc, [-1, 1], self.act_range)
         proc = proc.reshape(self.act_dim, 1)
         return proc

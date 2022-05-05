@@ -1,19 +1,61 @@
-from drone_env.drone_env.envs.common.abstract import AbstractEnv
+from drone_env.envs.common.abstract import AbstractEnv
 import pytest
 from drone_env.envs.common.gazebo_connection import GazeboConnection
 from drone_env.envs.common.action import action_factory
 import copy
 import numpy as np
-
+import rospy
 
 # ============== test env ==============#
 
 
-def test_action():
-    GazeboConnection.reset_sim()
+def test_continuous_action():
+    rospy.init_node(
+        "test_act",
+        anonymous=True,
+        disable_signals=True,
+    )
 
-    action_type = action_factory(env=AbstractEnv, config={"type": "ContinuousAction"})
+    GazeboConnection().reset_sim()
+    GazeboConnection().unpause_sim()
 
-    action = action_type.sample()
-    action = np.zeros_like(action)
+    config = {"type": "ContinuousAction", "dbg_act": True, "act_noise_stdv": 0}
+    action_type = action_factory(env=AbstractEnv, config=config)
+    action = 0.457 * np.ones(action_type.act_dim)
     action_type.act(action)
+
+    t = 0
+    while t < 100:
+        t += 1
+        rospy.sleep(0.1)
+
+
+def test_continuous_differential_action():
+    rospy.init_node(
+        "test_act",
+        anonymous=True,
+        disable_signals=True,
+    )
+
+    GazeboConnection().reset_sim()
+    GazeboConnection().unpause_sim()
+    rospy.sleep(1)
+
+    config = {
+        "type": "ContinuousDifferentialAction",
+        "dbg_act": True,
+        "act_noise_stdv": 0,
+    }
+    action_type = action_factory(
+        env=AbstractEnv,
+        config=config,
+    )
+    action = 0.1 * np.ones(action_type.act_dim)
+    t = 0
+    while t < 100:
+        t += 1
+        action_type.act(action)
+        rospy.sleep(0.05)
+
+
+test_continuous_action()

@@ -58,7 +58,7 @@ class RandomGoal(TargetType):
         target_name_space="target_0",
         new_target_every_ts: int = 1200,
         DBG_ROS=False,
-        range_dict={"xy": [-105, 105], "z": [-5, -210], "v": [0, 30]},
+        range_dict={"xy": [-50, 50], "z": [-5, -100], "v": [0, 30]},
         **kwargs,  # pylint: disable=unused-argument
     ) -> None:
         super().__init__(env)

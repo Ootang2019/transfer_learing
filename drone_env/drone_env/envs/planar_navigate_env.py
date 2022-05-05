@@ -7,12 +7,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import rospy
-from blimp_env.envs.common.abstract import ROSAbstractEnv
-from blimp_env.envs.common.action import Action
+from drone_env.envs.common.abstract import ROSAbstractEnv
+from drone_env.envs.common.action import Action
 from geometry_msgs.msg import Point, Quaternion
 from std_msgs.msg import Float32MultiArray
 from rotors_comm.msg import WindSpeed
-from blimp_env.envs.script import close_simulation, change_buoynacy
+from drone_env.envs.script import close_simulation
 import line_profiler
 import copy
 
@@ -201,10 +201,6 @@ class PlanarNavigateEnv(ROSAbstractEnv):
             self.target_type.sample_new_wplist(n_waypoints=n_waypoints)
         if self.config["simulation"]["enable_wind_sampling"]:
             self._sample_wind_state()
-        if self.config["simulation"]["enable_buoyancy_sampling"]:
-            self._sample_buoyancy(
-                buoyancy_range=self.config["simulation"]["buoyancy_range"]
-            )
 
         obs, _ = self.observation_type.observe()
         return obs
@@ -226,23 +222,6 @@ class PlanarNavigateEnv(ROSAbstractEnv):
         self.wind_state.velocity.y = np.random.uniform(-wind_speed, wind_speed)
         self.wind_state.velocity.z = np.random.uniform(
             -wind_speed / 10, wind_speed / 10
-        )
-
-    def _sample_buoyancy(
-        self,
-        deflation_range=[0.0, 1.5],
-        freeflop_angle_range=[0.0, 1.5],
-        collapse_range=[0.0, 0.02],
-        buoyancy_range=[0.9, 1.1],
-    ):
-        change_buoynacy(
-            robot_id=self.config["robot_id"],
-            ros_port=self.config["ros_port"],
-            gaz_port=self.config["gaz_port"],
-            deflation=np.random.uniform(*deflation_range),
-            freeflop_angle=np.random.uniform(*freeflop_angle_range),
-            collapse=np.random.uniform(*collapse_range),
-            buoyancy=np.random.uniform(*buoyancy_range),
         )
 
     def _reward(
@@ -897,13 +876,13 @@ class YawControlEnv(ResidualPlanarNavigateEnv):
 
 if __name__ == "__main__":
     import copy
-    from blimp_env.envs.common.gazebo_connection import GazeboConnection
-    from blimp_env.envs.script import close_simulation
+    from drone_env.envs.common.gazebo_connection import GazeboConnection
+    from drone_env.envs.script import close_simulation
 
     # ============== profile ==============#
     # 1. pip install line-profiler
     # 2. in terminal:
-    # kernprof -l -v blimp_env/envs/planar_navigate_env.py
+    # kernprof -l -v drone_env/envs/planar_navigate_env.py
 
     auto_start_simulation = False
     if auto_start_simulation:
