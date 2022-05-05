@@ -62,9 +62,10 @@ class RandomGoal(TargetType):
 
         self.target_name_space = target_name_space
 
-        self.target_dim = 14
+        self.target_dim = 16
         self.pos_cmd_data = np.zeros(3)
-        self.vel_cmd_data = np.zeros(1)
+        self.vel_cmd_data = np.zeros(3)
+        self.ori_cmd_data = np.zeros(4)
         self.ang_cmd_data = np.zeros(3)
         self.angvel_cmd_data = np.zeros(3)
 
@@ -134,7 +135,10 @@ class RandomGoal(TargetType):
         z = np.random.uniform(*z_range)
         pos_cmd = np.array([x, y, z])
 
-        v_cmd = np.random.uniform(*v_range)
+        vx = np.random.uniform(*v_range)
+        vy = np.random.uniform(*v_range)
+        vz = np.random.uniform(*v_range)
+        v_cmd = np.array([vx, vy, vz])
 
         phi = np.random.uniform(*phi_range)
         the = np.random.uniform(*the_range)
@@ -173,7 +177,7 @@ class RandomGoal(TargetType):
         self.ori_cmd_data = q_cmd
         self.angvel_cmd_data = angvel_cmd
 
-    def sample(self, machine_state: dict = {}) -> Dict[str, np.ndarray]:
+    def sample(self, **kwargs) -> Dict[str, np.ndarray]:
         """sample target state depend on machine_state
 
         machine_state (dict): machine position, veloctiy, orientation, etc.
@@ -183,11 +187,11 @@ class RandomGoal(TargetType):
         """
         self.publish_waypoint_toRviz(self.pos_cmd_data)
         return {
+            "orientation": self.ori_cmd_data,
+            "angle": self.ang_cmd_data,
+            "angular_velocity": self.angvel_cmd_data,
             "position": self.pos_cmd_data,
             "velocity": self.vel_cmd_data,
-            "angle": self.ang_cmd_data,
-            "orientation": self.ori_cmd_data,
-            "angular_velocity": self.angvel_cmd_data,
         }
 
 
@@ -310,7 +314,9 @@ class MultiGoal(TargetType):
         if self.next_wp_index >= self.wp_max_index:
             self.next_wp_index = 0
 
-    def sample(self, machine_state: dict) -> Dict[str, np.ndarray]:
+    def sample(
+        self, machine_position: np.array = np.zeros(3), **kwargs
+    ) -> Dict[str, np.ndarray]:
         """sample target state depend on machine_state
 
         machine_state (dict): machine position, veloctiy, orientation, etc.
@@ -322,7 +328,7 @@ class MultiGoal(TargetType):
         if self.env._pub_and_sub:
             if self.close_enough(
                 self.wp_list[self.wp_index].position,
-                machine_state["position"],
+                machine_position,
                 self.trigger_dist,
             ):
                 self._wp_index_plus_one()

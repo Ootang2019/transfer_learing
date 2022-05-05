@@ -98,8 +98,9 @@ class ROSObservation(ObservationType):
 
     def space(self) -> spaces.Space:
         return spaces.Box(
-            low=np.full((self.obs_dim), -1),
-            high=np.full((self.obs_dim), 1),
+            low=-1,
+            high=1,
+            shape=(self.obs_dim,),
             dtype=np.float32,
         )
 
@@ -235,7 +236,8 @@ class KinematicsObservation(ROSObservation):
         "ori_diff",  # 4
         "angvel_diff",  # 3
         "pos_diff",  # 3
-        "vel_diff",  # 1
+        "vel_diff",  # 3
+        "vel_norm_diff",  # 1
         "ori",  # 4
         "angvel",  # 3
         "pos",  # 3
@@ -244,14 +246,15 @@ class KinematicsObservation(ROSObservation):
         "goal_ori",  # 4
         "goal_angvel",  # 3
         "goal_pos",  # 3
-        "goal_vel",  # 1
+        "goal_vel",  # 3
     ]
-    OBS_DIM = 38
+    OBS_DIM = 43
     OBS_RANGE = {
         "ori_diff": [-1, 1],
         "angvel_diff": [-50, 50],
         "pos_diff": [-50, 50],
         "vel_diff": [-50, 50],
+        "vel_norm_diff": [-50, 50],
         "ori": [-1, 1],
         "angvel": [-50, 50],
         "pos": [-50, 50],
@@ -289,7 +292,6 @@ class KinematicsObservation(ROSObservation):
     def _observe(self) -> np.ndarray:
         goal_dict = self.env.goal
         obs_dict = {
-            "task": goal_dict["task"],
             "position": self.pos_data,
             "velocity": self.vel_data,
             "velocity_norm": np.linalg.norm(self.vel_data),
@@ -348,7 +350,8 @@ class KinematicsObservation(ROSObservation):
             "ori_diff": obs_ori - goal_ori,
             "angvel_diff": obs_angvel - goal_angvel,
             "pos_diff": obs_pos - goal_pos,
-            "vel_diff": np.linalg.norm(obs_vel) - goal_vel,
+            "vel_diff": obs_vel - goal_vel,
+            "vel_norm_diff": np.linalg.norm(obs_vel - goal_vel),
             "ori": obs_ori,
             "angvel": obs_angvel,
             "pos": obs_pos,

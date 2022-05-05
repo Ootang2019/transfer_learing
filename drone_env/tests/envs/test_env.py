@@ -1,12 +1,11 @@
 import pytest
-from blimp_env.envs import PlanarNavigateEnv
-from blimp_env.envs.common.gazebo_connection import GazeboConnection
+from drone_env.envs import BaseEnv
+from drone_env.envs.common.gazebo_connection import GazeboConnection
 from stable_baselines3.common.env_checker import check_env
 import copy
 import numpy as np
 
-ENV = PlanarNavigateEnv
-
+ENV = BaseEnv
 env_kwargs = {
     "DBG": True,
     "simulation": {
@@ -14,10 +13,10 @@ env_kwargs = {
     },
     "observation": {
         "DBG_ROS": False,
-        "DBG_OBS": True,
+        "DBG_OBS": False,
     },
     "action": {
-        "DBG_ACT": True,
+        "DBG_ACT": False,
     },
     "target": {"DBG_ROS": False},
 }
@@ -37,12 +36,13 @@ def test_env_step():
         action = env.action_space.sample()
         obs, rew, terminal, info = env.step(action)
 
-        assert env.observation_space.contains(obs)
         assert isinstance(rew, float)
         assert isinstance(terminal, bool)
         assert isinstance(info, dict)
 
         assert rew >= -1 and rew <= 1
+
+        assert env.observation_space.contains(obs)
 
     GazeboConnection().unpause_sim()
 
@@ -85,7 +85,7 @@ def test_compute_success_rew():
 
 def test_is_terminal(mocker):
     env = ENV(copy.deepcopy(env_kwargs))
-    mock_fn = "blimp_env.envs.planar_navigate_env.PlanarNavigateEnv.compute_success_rew"
+    mock_fn = "drone_env.envs.planar_navigate_env.PlanarNavigateEnv.compute_success_rew"
     dummy_obs_info = {"position": np.array([0, 0, 0])}
 
     env.config["duration"] = 100
@@ -121,7 +121,7 @@ def test_rew(mocker):
     env = ENV(copy.deepcopy(env_kwargs))
     env.config["tracking_reward_weights"] = np.array([0.1, 0.2, 0.3, 0.4])
     env.config["reward_weights"] = np.array([1, 0.95, 0.05])
-    mock_fn = "blimp_env.envs.planar_navigate_env.PlanarNavigateEnv.compute_success_rew"
+    mock_fn = "drone_env.envs.planar_navigate_env.PlanarNavigateEnv.compute_success_rew"
     dummy_obs_info = {"position": np.array([0, 0, 0])}
 
     def dummy_act_rew():
@@ -442,8 +442,8 @@ def test_process_action(idx):
     env = ENV(copy.deepcopy(env_kwargs))
     fn = env.action_type.process_action
 
-    env.action_type.forward_servo=True
-    env.action_type.disable_servo=False
+    env.action_type.forward_servo = True
+    env.action_type.disable_servo = False
     input, expect = get_test_process_action_io()
     result = fn(
         *input[idx],

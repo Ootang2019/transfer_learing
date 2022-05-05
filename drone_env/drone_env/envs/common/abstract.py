@@ -13,7 +13,6 @@ import numpy as np
 import rosgraph
 import rospy
 from drone_env.envs.common.action import Action, ActionType, action_factory
-from drone_env.envs.common.controllers_connection import ControllersConnection
 from drone_env.envs.common.gazebo_connection import GazeboConnection
 from drone_env.envs.common.observation import ObservationType, observation_factory
 from drone_env.envs.common.target import TargetType, target_factory
@@ -225,9 +224,6 @@ class ROSAbstractEnv(AbstractEnv):
             self.gaz = GazeboConnection(
                 start_init_physics_parameters=True, reset_world_or_sim="WORLD"
             )
-            self.controllers_object = ControllersConnection(
-                namespace=self.config["name_space"]
-            )
         self.rate = rospy.Rate(self.config["simulation_frequency"])
 
         self._pub_and_sub = False
@@ -341,7 +337,6 @@ class ROSAbstractEnv(AbstractEnv):
         self.gaz.pause_sim()
 
     def _reset_joint_and_check_sys(self):
-        self.controllers_object.reset_drone_joint_controllers()
         self.action_type.set_init_pose()
         self.observation_type.check_connection()
         self.target_type.check_connection()
@@ -373,7 +368,7 @@ class ROSAbstractEnv(AbstractEnv):
     def one_step(self, action: Action) -> Tuple[Observation, float, bool, dict]:
         """perform a step action and observe result"""
         self._simulate(action)
-        obs = self.observation_type.observe()
+        obs, _ = self.observation_type.observe()
         reward = self._reward(obs, action)
         terminal = self._is_terminal()
 

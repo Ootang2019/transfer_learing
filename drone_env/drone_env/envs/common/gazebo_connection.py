@@ -22,7 +22,7 @@ class GazeboConnection:
 
         self._max_update_rate = Float64(1000.0)
         self._ode_config = ODEPhysics()
-        self._time_step = Float64(0.005)  # 0.001, 0.005
+        self._time_step = Float64(0.001)  # 0.001, 0.005
 
         self.delete = rospy.ServiceProxy("gazebo/delete_model", DeleteModel)
         self.spawn = rospy.ServiceProxy("gazebo/spawn_urdf_model", SpawnModel)

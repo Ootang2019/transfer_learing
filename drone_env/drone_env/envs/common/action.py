@@ -75,7 +75,7 @@ class ROSActionType(ActionType):
         self.actuator_name_space = self.name_space + "/command/motor_speed"
 
         self.act_dim = 4
-        self.cur_act = self.init_act = np.zeros(self.act_dim)
+        self.cur_act = self.init_act = 0.437 * np.ones(self.act_dim)
 
         self._create_pub_and_sub()
 
