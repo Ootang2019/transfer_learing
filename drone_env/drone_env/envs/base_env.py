@@ -175,14 +175,20 @@ class BaseEnv(ROSAbstractEnv):
         self.done = False
         self._reset()
 
+        self._sample_new_goal()
+
+        obs, _ = self.observation_type.observe()
+        return obs
+
+    def _sample_new_goal(self):
         if self.config["target"]["type"] == "MultiGoal" and self.config["target"].get(
             "enable_random_goal", True
         ):
             n_waypoints = np.random.randint(4, 8)
             self.target_type.sample_new_wplist(n_waypoints=n_waypoints)
-
-        obs, _ = self.observation_type.observe()
-        return obs
+        elif self.config["target"]["type"] == "RandomGoal":
+            pos = self.config["simulation"]["position"]
+            self.target_type.sample_new_goal(origin=np.array([pos[1], pos[0], -pos[2]]))
 
     def _update_goal_and_env(self, obs_info={}):
         """update goal and env state"""

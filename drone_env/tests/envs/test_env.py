@@ -29,6 +29,9 @@ def test_env_functions():
     GazeboConnection().unpause_sim()
 
 
+test_env_functions()
+
+
 def test_env_step():
     env = ENV(copy.deepcopy(env_kwargs))
     env.reset()

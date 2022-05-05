@@ -16,7 +16,6 @@ DEFAULT_ROSPORT = 11311
 DEFAULT_GAZPORT = 11351
 
 
-
 # ============ check screen ============#
 
 
@@ -31,9 +30,7 @@ def find_screen_session(name: str):
     return screen_name
 
 
-def check_screen_sessions_exist(
-    names: list = ["ROSMASTER_", "WORLD_", "DRONE_"]
-):
+def check_screen_sessions_exist(names: list = ["ROSMASTER_", "WORLD_", "DRONE_"]):
     all_exist = True
     for name in names:
         all_exist *= find_screen_session(name) is not None
@@ -90,17 +87,16 @@ def spawn_drone(
     """spawn drone software in-the-loop"""
 
     names = ["DRONE_" + str(robot_id)]
-    while check_screen_sessions_exist(names=names) is not True:
-        kill_screens(robot_id=robot_id, screen_names=names, sleep_times=[1])
-        call_reply = subprocess.check_call(
-            str(path)
-            + f"/spawn_drone.sh -i {robot_id} -r {ros_port} -p {gaz_port} -px {position[0]} -py {position[1]} -pz {position[2]} -n {namespace} -m {mav_name}",
-            shell=True,
-        )
-        time.sleep(3)
+    # while check_screen_sessions_exist(names=names) is not True:
+    kill_screens(robot_id=robot_id, screen_names=names, sleep_times=[1])
+    call_reply = subprocess.check_call(
+        str(path)
+        + f"/spawn_drone.sh -i {robot_id} -r {ros_port} -p {gaz_port} -px {position[0]} -py {position[1]} -pz {position[2]} -n {namespace} -m {mav_name}",
+        shell=True,
+    )
+    time.sleep(3)
 
     return int(call_reply)
-
 
 
 # ============ Composite Spawn Script ============#
@@ -204,6 +200,7 @@ def remove_drone(robot_id: int) -> int:
 
 
 # ============ Respawn Script ============#
+
 
 @timeout(50, os.strerror(errno.ETIMEDOUT))
 def respawn_model(
