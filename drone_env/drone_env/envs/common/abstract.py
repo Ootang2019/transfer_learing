@@ -12,15 +12,14 @@ import gym
 import numpy as np
 import rosgraph
 import rospy
-from blimp_env.envs.common.action import Action, ActionType, action_factory
-from blimp_env.envs.common.controllers_connection import ControllersConnection
-from blimp_env.envs.common.gazebo_connection import GazeboConnection
-from blimp_env.envs.common.observation import ObservationType, observation_factory
-from blimp_env.envs.common.target import TargetType, target_factory
-from blimp_env.envs.common.utils import update_dict
-from blimp_env.envs.script.blimp_script import (
+from drone_env.envs.common.action import Action, ActionType, action_factory
+from drone_env.envs.common.controllers_connection import ControllersConnection
+from drone_env.envs.common.gazebo_connection import GazeboConnection
+from drone_env.envs.common.observation import ObservationType, observation_factory
+from drone_env.envs.common.target import TargetType, target_factory
+from drone_env.envs.common.utils import update_dict
+from drone_env.envs.script.drone_script import (
     spawn_simulation_on_different_port,
-    spawn_simulation_on_marvin,
     kill_screens,
     kill_rosnode,
 )

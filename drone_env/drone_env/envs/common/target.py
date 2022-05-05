@@ -3,8 +3,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import rospy
-from blimp_env.envs.common import utils
-from blimp_env.envs.script.blimp_script import respawn_target, spawn_target
+from drone_env.envs.common import utils
 from gym import spaces
 from librepilot.msg import AutopilotInfo
 from transforms3d.euler import euler2quat, quat2euler
@@ -14,7 +13,7 @@ from geometry_msgs.msg import Point
 import time
 
 if TYPE_CHECKING:
-    from blimp_env.envs.common.abstract import AbstractEnv
+    from drone_env.envs.common.abstract import AbstractEnv
 
 
 class WayPoint:
@@ -22,6 +21,7 @@ class WayPoint:
         self.position = np.array(position)
         self.velocity = np.array(velocity)
         self.angle = np.array(angle)
+        self.orientation = euler2quat(angle)
 
     def to_ENU(self):
         return np.array([self.position[1], self.position[0], -self.position[2]])
@@ -58,7 +58,7 @@ class RandomGoal(TargetType):
         target_name_space="target_0",
         new_target_every_ts: int = 1200,
         DBG_ROS=False,
-        range_dict={"xy": [-105, 105], "z": [-5, -210], "v": [2, 7]},
+        range_dict={"xy": [-105, 105], "z": [-5, -210], "v": [0, 30]},
         **kwargs,  # pylint: disable=unused-argument
     ) -> None:
         super().__init__(env)
@@ -357,7 +357,7 @@ class AerobaticGoal(TargetType):
 
     TASK_TABLE = {
         "stand": 0,  # pitch 90 degree, z_vel 0 [m/s]
-        "backward": 1,  # control blimp to move backward
+        "backward": 1,  # control drone to move backward
         "upside_down": 2,  # pitch 180 degree, or roll 180 degree
         "loop": 3,  # max pitch velocity
         "roll": 4,  # max roll velocity

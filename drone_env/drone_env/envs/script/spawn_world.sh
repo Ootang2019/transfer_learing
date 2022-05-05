@@ -2,6 +2,7 @@
 
 WORLD="basic"
 gui=true
+paused=false
 robotID=0
 GAZ_PORT=11351
 ROS_PORT=11311
@@ -27,7 +28,7 @@ screen -dmS WORLD_${robotID} screen bash -c "\
     export ROS_IP=$ROSIP;\
     export ROS_HOSTNAME=$ROSIP;\
 	source ~/catkin_ws/devel/setup.bash;\
-	roslaunch blimp_description world.launch world_name:=$WORLD gui:=$gui"
+	roslaunch blimp_description world.launch world_name:=$WORLD gui:=$gui paused:=$paused"
 sleep 15
 echo "---- Gazebo World Spawned----"
 

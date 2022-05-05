@@ -1,2 +1,2 @@
 """ script  """
-from .blimp_script import *
+from .drone_script import *
