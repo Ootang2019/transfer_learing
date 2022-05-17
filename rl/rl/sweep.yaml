@@ -11,10 +11,10 @@ parameters:
     min: 2
     max: 10
   batch_size:
-    values: [64, 128, 256]
+    values: 128
   total_timesteps:
     value: 1e6
   n_timesteps:
     value: 200
   reward_scale:
-    value: 10
+    value: 0.1

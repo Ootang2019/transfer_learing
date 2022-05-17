@@ -153,7 +153,7 @@ class SQLAgent:
             for ts in range(self.n_timesteps):
                 action = self.behavior_net.choose_action(state)
                 next_state, reward, done, _ = env.step(action)
-                reward = reward / self.reward_scale
+                reward = self.reward_scale * reward
                 episode_reward += reward
                 self.replay_buffer.add((state, next_state, action, reward, done))
 
