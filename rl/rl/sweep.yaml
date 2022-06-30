@@ -4,17 +4,20 @@ metric:
   name: episode_reward
   goal: maximize
 parameters:
+  env:
+    value: "LunarLander-v2" #continuous: Pendulum-v1, LunarLander-v2
   lr:
-    min: 0.000001
-    max: 0.001
+    min: 0.0001
+    max: 0.01
+  policy_lr:
+    min: 0.0001
+    max: 0.01
   alpha:
-    min: 2
-    max: 10
-  batch_size:
-    values: [64,128, 256]
-  total_timesteps:
-    value: 1e6
-  n_timesteps:
-    value: 200
-  reward_scale:
-    values: [0.1, 1, 5]
+    min: 0.01
+    max: 10.0
+  value_n_particles:
+    min: 1
+    max: 128
+  kernel_n_particles:
+    min: 1
+    max: 128
