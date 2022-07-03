@@ -160,6 +160,7 @@ class ROSAbstractEnv(AbstractEnv):
                     "auto_start_simulation": True,
                     "maximum_local_worker": 8,
                     "position": (0, 0, 25),  # initial spawned position
+                    "simulation_time_step": 0.005,
                 },
                 "observation": {
                     "type": "PlanarKinematics",
@@ -182,9 +183,9 @@ class ROSAbstractEnv(AbstractEnv):
                     "gaz_port": 11351,
                 },
                 "seed": 123,
-                "simulation_frequency": 100,
+                "simulation_frequency": 200,
                 "policy_frequency": 50,
-                "duration": 3000,
+                "duration": 5000,
             }
         )
 
@@ -222,7 +223,9 @@ class ROSAbstractEnv(AbstractEnv):
         time.sleep(0.5)
         if not self.real_exp:
             self.gaz = GazeboConnection(
-                start_init_physics_parameters=True, reset_world_or_sim="WORLD"
+                start_init_physics_parameters=True,
+                reset_world_or_sim="WORLD",
+                time_step=self.config["simulation"]["simulation_time_step"],
             )
         self.rate = rospy.Rate(self.config["simulation_frequency"])
 

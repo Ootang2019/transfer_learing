@@ -12,10 +12,8 @@ from drone_env.envs.common.action import Action
 from geometry_msgs.msg import Point, Quaternion
 from std_msgs.msg import Float32MultiArray
 from drone_env.envs.script import close_simulation
-import line_profiler
 import copy
 
-profile = line_profiler.LineProfiler()
 
 Observation = Union[np.ndarray, float]
 
@@ -36,7 +34,7 @@ class BaseEnv(ROSAbstractEnv):
         )
         config["action"].update(
             {
-                "type": "ContinuousAction",
+                "type": "ContinuousAngularAction",
                 "act_noise_stdv": 0.05,
                 "max_thrust": 1.0,
             }
@@ -49,8 +47,8 @@ class BaseEnv(ROSAbstractEnv):
         )
         config.update(
             {
-                "duration": 3000,
-                "simulation_frequency": 100,  # [hz]
+                "duration": 6000,
+                "simulation_frequency": 200,  # [hz]
                 "policy_frequency": 50,  # [hz]
                 "reward_weights": np.array(
                     [100, 0.8, 0.2]
@@ -92,7 +90,6 @@ class BaseEnv(ROSAbstractEnv):
             queue_size=1,
         )
 
-    @profile
     def one_step(self, action: Action) -> Tuple[Observation, float, bool, dict]:
         """[perform a step action and observe result]
 
@@ -284,9 +281,9 @@ if __name__ == "__main__":
     from drone_env.envs.script import close_simulation
 
     # ============== profile ==============#
-    # 1. pip install line-profiler
-    # 2. in terminal:
-    # kernprof -l -v drone_env/envs/planar_navigate_env.py
+    # pip install snakeviz
+    # python -m cProfile -o out.profile drone_env/drone_env/envs/base_env.py -s time
+    # snakeviz base_env.profile
 
     auto_start_simulation = False
     if auto_start_simulation:
@@ -315,7 +312,6 @@ if __name__ == "__main__":
         },
     }
 
-    @profile
     def env_step():
         env = ENV(copy.deepcopy(env_kwargs))
         env.reset()

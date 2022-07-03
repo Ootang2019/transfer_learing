@@ -3,21 +3,19 @@ import pickle
 from pathlib import Path
 import os.path
 import gym
-import line_profiler
 import numpy as np
 import torch
 import torch.nn.functional as F
 import wandb
-
 from kernel import adaptive_isotropic_gaussian_kernel
 from policy import StochasticPolicy
 from replay_buffer import ReplayBuffer
 from util import assert_shape, get_sa_pairs, get_sa_pairs_
 from value_function import SoftQNetwork
+import cProfile
 
 torch.autograd.set_detect_anomaly(True)  # detect NaN
 
-profile = line_profiler.LineProfiler()
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 EPS = 1e-6
 
@@ -71,19 +69,19 @@ class SQLAgent(AbstractAgent):
     @classmethod
     def default_config(cls):
         return dict(
-            total_timesteps=1e6,
+            total_timesteps=1e5,
             n_timesteps=200,
             reward_scale=1,
             replay_buffer_size=1e6,
-            mini_batch_size=256,
+            mini_batch_size=128,
             min_n_experience=1024,
-            lr=1e-3,
-            alpha=1,
+            lr=0.0004924,
+            alpha=1.2,
             gamma=0.99,
             td_target_update_interval=1,
-            value_n_particles=32,
-            policy_lr=1e-3,
-            kernel_n_particles=32,
+            value_n_particles=88,
+            policy_lr=0.004866,
+            kernel_n_particles=54,
             kernel_update_ratio=0.5,
             render=False,
             net_kwargs={"value_sizes": [64, 64], "policy_sizes": [32, 32]},
@@ -206,7 +204,6 @@ class SQLAgent(AbstractAgent):
         batch_done = torch.FloatTensor(np.array(batch_done)).unsqueeze(1).to(device)
         return batch_state, batch_next_state, batch_action, batch_reward, batch_done
 
-    @profile
     def td_update(self, batch):
         if self.begin_learn_td is False:
             print("begin learning q function")
@@ -235,7 +232,7 @@ class SQLAgent(AbstractAgent):
 
         # eqn10: Q(s,a)
         s_a = get_sa_pairs(batch_next_state, sample_action)
-        q_value_target = self.target_net(s_a).reshape(batch_next_state.shape[0], -1)
+        q_value_target = self.target_net(s_a).view(batch_next_state.shape[0], -1)
         q_value_target *= 1 / self.alpha
 
         assert_shape(q_value_target, [None, self.value_n_particles])
@@ -281,16 +278,9 @@ class SQLAgent(AbstractAgent):
         }
         wandb.log(metrics)
 
-    @profile
     def svgd_update(self, batch):
         """Create a minimization operation for policy update (SVGD)."""
-        (
-            batch_state,
-            batch_next_state,
-            batch_action,
-            batch_reward,
-            batch_done,
-        ) = batch
+        (batch_state, _, _, _, _) = batch
 
         actions = self.policy.acitons_for(
             observations=batch_state, n_action_samples=self.kernel_n_particles
@@ -301,35 +291,27 @@ class SQLAgent(AbstractAgent):
         # a_j: updated actions
         n_updated_actions = int(self.kernel_n_particles * self.kernel_update_ratio)
         n_fixed_actions = self.kernel_n_particles - n_updated_actions
-
         fixed_actions, updated_actions = torch.split(
             actions, [n_fixed_actions, n_updated_actions], dim=1
         )
-        # fixed_actions = fixed_actions.detach()
         assert_shape(fixed_actions, [None, n_fixed_actions, self.action_dim])
         assert_shape(updated_actions, [None, n_updated_actions, self.action_dim])
 
         s_a = get_sa_pairs_(batch_state, fixed_actions)
-        svgd_target_values = self.behavior_net(s_a).reshape(batch_state.shape[0], -1)
+        svgd_target_values = self.behavior_net(s_a).view(batch_state.shape[0], -1)
 
         # Target log-density. Q_soft in Equation 13:
         squash_correction = torch.sum(torch.log(1 - fixed_actions**2 + EPS), dim=-1)
         log_p = svgd_target_values + squash_correction
-        # log_p = svgd_target_values
 
         grad_log_p = torch.autograd.grad(
             log_p, fixed_actions, grad_outputs=torch.ones_like(log_p)
         )
-        grad_log_p = grad_log_p[0]
-
-        grad_log_p = grad_log_p.unsqueeze(2).detach()
+        grad_log_p = grad_log_p[0].unsqueeze(2).detach()
         assert_shape(grad_log_p, [None, n_fixed_actions, 1, self.action_dim])
 
-        kernel_dict = self.kernel_fn(
-            xs=fixed_actions, ys=updated_actions, device=device
-        )
-
         # kernel function in Equation 13:
+        kernel_dict = self.kernel_fn(xs=fixed_actions, ys=updated_actions)
         kappa = kernel_dict["output"].unsqueeze(3)
         assert_shape(kappa, [None, n_fixed_actions, n_updated_actions, 1])
 
@@ -370,19 +352,21 @@ class SQLAgent(AbstractAgent):
         wandb.log(metrics)
 
     def save_model(self):
+        path = self.save_path + "/" + str(self.epoch)
+        Path(path).mkdir(parents=True, exist_ok=True)
         torch.save(
             {
                 "epoch": self.epoch,
                 "model_state_dict": self.behavior_net.state_dict(),
             },
-            self.save_path + "/" + str(self.epoch) + "/value_net.pth",
+            path + "/value_net.pth",
         )
         torch.save(
             {
                 "epoch": self.epoch,
                 "model_state_dict": self.policy.state_dict(),
             },
-            self.save_path + "/" + str(self.epoch) + "/policy_net.pth",
+            path + "/policy_net.pth",
         )
 
     def load_model(self, path):
@@ -415,26 +399,34 @@ class SQLAgent(AbstractAgent):
 
 if __name__ == "__main__":
     # ============== profile ==============#
-    # 1. pip install line-profiler
-    # 2. in terminal:
-    # kernprof -l -v rl/rl/softqlearning/sql.py
+    # pip install snakeviz
+    # python -m cProfile -o out.profile rl/rl/softqlearning/sql.py -s time
+    # snakeviz sql.profile
 
-    env = "LunarLander-v2"  # Pendulum-v1, LunarLander-v2
+    # ============== sweep ==============#
+    # wandb sweep rl/rl/sweep.yaml
+
+    env = "InvertedDoublePendulum-v4"  # Pendulum-v1, LunarLander-v2, InvertedDoublePendulum-v4, MountainCarContinuous-v0, Ant-v4
     env_kwargs = {"continuous": True} if env == "LunarLander-v2" else {}
-    render = False
+    render = True
 
     save_path = "~/results/" + env + "/" + str(datetime.datetime.now())
     save_path = os.path.expanduser(save_path)
 
     default_dict = SQLAgent.default_config()
     default_dict.update(
-        dict(env=env, env_kwargs=env_kwargs, save_path=save_path, render=render)
+        dict(
+            env=env,
+            env_kwargs=env_kwargs,
+            save_path=save_path,
+            render=render,
+        )
     )
 
     wandb.init(config=default_dict)
     print(wandb.config)
 
     agent = SQLAgent(**wandb.config)
-    agent.save_config(wandb.config)
     agent.train()
+    agent.save_config(wandb.config)
     agent.save_model()

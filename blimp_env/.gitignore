@@ -1,5 +1,6 @@
 pylintrc
-
+*.profile
+*.lprof
 .vscode/
 
 # Byte-compiled / optimized / DLL files

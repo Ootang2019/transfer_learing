@@ -4,8 +4,6 @@ import numpy
 import line_profiler
 from util import get_sa_pairs
 
-profile = line_profiler.LineProfiler()
-
 
 class StochasticPolicy(nn.Module):
     """Stochastic NN policy"""
@@ -35,14 +33,11 @@ class StochasticPolicy(nn.Module):
 
     def get_action(self, observation):
         observation = torch.tensor(observation, dtype=torch.float32).to(self.device)
-        action = self.get_actions(observation).squeeze(0)[0]
-        return action.cpu().detach().numpy()
+        return self.get_actions(observation).squeeze(0)[0].cpu().detach().numpy()
 
     def get_actions(self, observations):
-        action = self.acitons_for(observations)
-        return action
+        return self.acitons_for(observations)
 
-    @profile
     def acitons_for(self, observations, n_action_samples=1):
         if observations.ndim > 1:
             n_state_samples = observations.shape[0]
@@ -54,7 +49,7 @@ class StochasticPolicy(nn.Module):
         latents = torch.normal(0, 1, size=latent_shape).to(self.device)
 
         s_a = get_sa_pairs(observations, latents)
-        raw_actions = self.forward(s_a).reshape(
+        raw_actions = self.forward(s_a).view(
             n_state_samples, n_action_samples, self.action_dim
         )
 

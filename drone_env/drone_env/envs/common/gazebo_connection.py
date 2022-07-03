@@ -17,12 +17,18 @@ from std_srvs.srv import Empty
 class GazeboConnection:
     """handel connection to gazebo simulator"""
 
-    def __init__(self, start_init_physics_parameters=True, reset_world_or_sim="WORLD"):
+    def __init__(
+        self,
+        start_init_physics_parameters=True,
+        reset_world_or_sim="WORLD",
+        max_update_rate=1000.0,
+        time_step=0.001,
+    ):
         rospy.loginfo("GazeboConnection Initializing ...")
 
-        self._max_update_rate = Float64(1000.0)
+        self._time_step = Float64(time_step)  # 0.001, 0.005
+        self._max_update_rate = Float64(max_update_rate)
         self._ode_config = ODEPhysics()
-        self._time_step = Float64(0.001)  # 0.001, 0.005
 
         self.delete = rospy.ServiceProxy("gazebo/delete_model", DeleteModel)
         self.spawn = rospy.ServiceProxy("gazebo/spawn_urdf_model", SpawnModel)

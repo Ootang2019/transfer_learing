@@ -5,7 +5,7 @@ metric:
   goal: maximize
 parameters:
   env:
-    value: "LunarLander-v2" #continuous: Pendulum-v1, LunarLander-v2
+    value: "InvertedDoublePendulum-v4" #continuous: Pendulum-v1, InvertedDoublePendulum-v4, LunarLander-v2, MountainCarContinuous-v0, Ant-v2
   lr:
     min: 0.0001
     max: 0.01

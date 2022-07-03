@@ -228,6 +228,45 @@ class ContinuousAction(ROSActionType):
         )
 
 
+class ContinuousAngularAction(ContinuousAction):
+    """control row, pitch, yaw, thrust"""
+
+    def mixer(self, action: np.array):
+        row, pitch, yaw, thrust = action
+        m0 = -pitch - yaw + thrust
+        m1 = row + yaw + thrust
+        m2 = pitch - yaw + thrust
+        m3 = -row + yaw + thrust
+        return np.array([m0, m1, m2, m3])
+
+    def process_action(self, action: np.array, noise_stdv: float = 0):
+        action = self.mixer(action)
+        action += np.random.normal(0, noise_stdv, action.shape)
+        proc = np.clip(action, 0, self.max_thrust)
+        proc = utils.lmap(proc, [-1, 1], self.act_range)
+        proc = proc.reshape(self.act_dim, 1)
+        return proc
+
+    def act(self, action: np.ndarray) -> None:
+        """publish action
+
+        Args:
+            action (np.ndarray): agent action
+        """
+        processed_action = self.process_action(action, self.act_noise_stdv)
+        self.cur_act = processed_action
+
+        act_msg = Actuators()
+        act_msg.header.stamp = rospy.Time.now()
+        act_msg.angular_velocities = processed_action
+
+        self.action_publisher.publish(act_msg)
+
+        if self.dbg_act:
+            print("[ Action ] act: action:", action)
+            print("[ Action ] act: processed_action:", processed_action)
+
+
 class ContinuousDifferentialAction(ContinuousAction):
     """an accumulative action space to hard constraint the maximum change of the actuators
 
@@ -321,6 +360,8 @@ def action_factory(  # pylint: disable=too-many-return-statements
     """control action type"""
     if config["type"] == "ContinuousAction":
         return ContinuousAction(env, **config)
+    elif config["type"] == "ContinuousAngularAction":
+        return ContinuousAngularAction(env, **config)
     elif config["type"] == "ContinuousDifferentialAction":
         return ContinuousDifferentialAction(env, **config)
     else:

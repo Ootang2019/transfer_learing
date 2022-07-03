@@ -1,8 +1,12 @@
 import torch
 import numpy as np
 
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-def adaptive_isotropic_gaussian_kernel(xs, ys, h_min=1e-3, device="cpu"):
+H_min = torch.tensor(1e-3).unsqueeze(0).to(device)
+
+
+def adaptive_isotropic_gaussian_kernel(xs, ys):
     """Gaussian kernel with dynamic bandwidth
 
     the bandwidth is adjusted dynamically to match median_distance / log(Kx)
@@ -43,7 +47,7 @@ def adaptive_isotropic_gaussian_kernel(xs, ys, h_min=1e-3, device="cpu"):
     # get median
     input_shape = (leading_shape[0], Kx * Ky)
     values, _ = torch.topk(
-        input=dist_sq.reshape(input_shape),
+        input=dist_sq.view(input_shape),
         k=(Kx * Ky // 2 + 1),  # This is exactly true only if Kx*Ky is odd.
         sorted=True,  # ... x floor(Ks*Kd/2)
     )
@@ -51,9 +55,8 @@ def adaptive_isotropic_gaussian_kernel(xs, ys, h_min=1e-3, device="cpu"):
     medians_sq = values[..., -1]  # ... (shape) (last element is the median)
 
     h = medians_sq / np.log(Kx)  # ... (shape)
-    h = torch.max(torch.cat((h, torch.tensor(h_min).unsqueeze(0).to(device))))
-    h = h.detach()
-    h_expanded_twice = h.unsqueeze(-1).unsqueeze(-1)
+    h = torch.max(torch.cat((h, H_min))).detach()
+    h_expanded_twice = h[..., None, None]
     # ... x 1 x 1
 
     kappa = torch.exp(-dist_sq / h_expanded_twice)  # ... x Kx x Ky
