@@ -56,6 +56,18 @@ class RandomGoal(TargetType):
         self,
         env: "AbstractEnv",
         target_name_space="goal_0",
+        range_dict: dict = dict(
+            x_range=(-50, 50),
+            y_range=(-50, 50),
+            z_range=(-5, -50),
+            v_range=(-50, 50),
+            phi_range=(-np.pi, np.pi),
+            the_range=(-np.pi, np.pi),
+            psi_range=(-np.pi, np.pi),
+            phivel_range=(-10, 10),
+            thevel_range=(-10, 10),
+            psivel_range=(-10, 10),
+        ),
         **kwargs,  # pylint: disable=unused-argument
     ) -> None:
         super().__init__(env)
@@ -69,18 +81,7 @@ class RandomGoal(TargetType):
         self.ang_cmd_data = np.zeros(3)
         self.angvel_cmd_data = np.zeros(3)
 
-        self.range_dict = dict(
-            x_range=(-50, 50),
-            y_range=(-50, 50),
-            z_range=(-5, -50),
-            v_range=(-50, 50),
-            phi_range=(-np.pi, np.pi),
-            the_range=(-np.pi, np.pi),
-            psi_range=(-np.pi, np.pi),
-            phivel_range=(-10, 10),
-            thevel_range=(-10, 10),
-            psivel_range=(-10, 10),
-        )
+        self.range_dict = range_dict
 
         self._pub_and_sub = False
         self._create_pub_and_sub()
@@ -193,6 +194,44 @@ class RandomGoal(TargetType):
             "position": self.pos_cmd_data,
             "velocity": self.vel_cmd_data,
         }
+
+
+class FixedGoal(RandomGoal):
+    def __init__(
+        self,
+        env: "AbstractEnv",
+        target_name_space="goal_0",
+        range_dict: dict = dict(
+            x_range=(-0, 0),
+            y_range=(-0, 0),
+            z_range=(-30, -30),
+            v_range=(-0, 0),
+            phi_range=(-0, 0),
+            the_range=(-0, 0),
+            psi_range=(-0, 0),
+            phivel_range=(-0, 0),
+            thevel_range=(-0, 0),
+            psivel_range=(-0, 0),
+        ),
+        **kwargs,
+    ) -> None:
+        super().__init__(env, target_name_space, range_dict, **kwargs)
+
+    def sample_new_goal(
+        self,
+        range_dict={},
+    ):
+        self.range_dict.update(range_dict)
+        pos_cmd, v_cmd, ang_cmd, q_cmd, angvel_cmd = self.generate_goal(
+            **self.range_dict
+        )
+
+        self.pos_cmd_data = pos_cmd
+        self.vel_cmd_data = v_cmd
+        self.ang_cmd_data = ang_cmd
+        self.ori_cmd_data = q_cmd
+        self.angvel_cmd_data = angvel_cmd
+
 
 
 class MultiGoal(TargetType):
@@ -401,6 +440,8 @@ def target_factory(env: "AbstractEnv", config: dict) -> TargetType:
     """
     if config["type"] == "RandomGoal":
         return RandomGoal(env, **config)
+    elif config["type"] == "FixedGoal":
+        return FixedGoal(env, **config)
     elif config["type"] == "MultiGoal":
         return MultiGoal(env, **config)
     else:

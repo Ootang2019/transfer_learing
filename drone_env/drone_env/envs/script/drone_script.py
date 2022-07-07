@@ -71,7 +71,7 @@ def spawn_world(
             + f"/spawn_world.sh -i {robot_id} -g {gui} -d {world} -p {gaz_port} -r {ros_port}",
             shell=True,
         )
-        time.sleep(3)
+        time.sleep(5)
 
     return int(call_reply)
 
@@ -94,12 +94,37 @@ def spawn_drone(
         + f"/spawn_drone.sh -i {robot_id} -r {ros_port} -p {gaz_port} -px {position[0]} -py {position[1]} -pz {position[2]} -n {namespace} -m {mav_name}",
         shell=True,
     )
-    time.sleep(3)
+    time.sleep(10)
 
     return int(call_reply)
 
 
 # ============ Composite Spawn Script ============#
+
+
+def spawn_drone_sim(
+    robot_id: int = 0,
+    gui: bool = False,
+    world: str = "basic",
+    ros_port: int = DEFAULT_ROSPORT,
+    gaz_port: int = DEFAULT_GAZPORT,
+    position: tuple = (0, 0, 100),
+    namespace: str = "machine_",
+    mav_name: str = "hummingbird",
+    **kwargs,
+) -> int:
+    """spawn drone software in-the-loop"""
+
+    names = ["DRONE_" + str(robot_id)]
+    while check_screen_sessions_exist(names=names) is not True:
+        call_reply = subprocess.check_call(
+            str(path)
+            + f"/spawn_drone_sim.sh -i {robot_id} -g {gui} -d {world} -r {ros_port} -p {gaz_port} -px {position[0]} -py {position[1]} -pz {position[2]} -n {namespace} -m {mav_name}",
+            shell=True,
+        )
+        time.sleep(5)
+
+    return int(call_reply)
 
 
 def spawn_simulation_on_different_port(
@@ -160,7 +185,7 @@ def kill_screen(screen_name, sleep_time=1):
 def kill_screens(
     robot_id: int,
     screen_names: list = ["DRONE_", "WORLD_", "ROSMASTER_"],
-    sleep_times: list = [3, 1, 10, 5],
+    sleep_times: list = [3, 10, 5],
 ) -> Tuple[int]:
     """kill screen session by specifying screen name and robot_id
 

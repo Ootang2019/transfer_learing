@@ -22,6 +22,7 @@ from drone_env.envs.common.utils import update_dict
 from drone_env.envs.script.drone_script import (
     kill_screens,
     spawn_simulation_on_different_port,
+    spawn_drone_sim,
 )
 from gym.utils import seeding
 
@@ -164,6 +165,7 @@ class ROSAbstractEnv(AbstractEnv):
                     "maximum_local_worker": 8,
                     "position": (0, 0, 25),  # initial spawned position
                     "simulation_time_step": 0.005,
+                    "spawn_fn": spawn_drone_sim,
                 },
                 "observation": {
                     "type": "PlanarKinematics",
@@ -314,7 +316,7 @@ class ROSAbstractEnv(AbstractEnv):
         self._spawn_sim()
 
     def _spawn_sim(self):
-        spawn_simulation_on_different_port(**self.config["simulation"])
+        self.config["simulation"]["spawn_fn"](**self.config["simulation"])
 
     def _create_pub_and_sub(self):
         pass

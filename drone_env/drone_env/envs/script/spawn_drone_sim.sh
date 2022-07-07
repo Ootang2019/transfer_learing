@@ -3,6 +3,9 @@
 # read params
 robotID=0
 
+WORLD="basic"
+GUI=False
+
 MAV_NAME=hummingbird
 NAMESPACE=machine_
 
@@ -17,6 +20,8 @@ Z=10
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         -i|--robotID) robotID="$2"; shift ;;
+        -g|--gui) GUI="$2"; shift ;;
+        -d|--world) WORLD="$2"; shift ;;
         -p|--gaz_port) GAZ_PORT="$2"; shift ;;
         -r|--ros_port) ROS_PORT="$2"; shift ;;
         -m|--mav_name) MAV_NAME="$2"; shift ;;
@@ -34,6 +39,7 @@ done
 
 echo "---- Spawn DRONE_${robotID} ----"
 echo "robotID:$robotID"
+echo "world:=${WORLD} gui:=${GUI}" 
 echo "X:=${X} Y:=${Y} Z:=${Z}"
 
 echo "Spawning DRONE_${robotID}"
@@ -43,8 +49,8 @@ screen -dmS DRONE_${robotID} screen bash -c "\
     export ROS_IP=$ROSIP;\
     export ROS_HOSTNAME=$ROSIP;\
 	source ~/catkin_ws/devel/setup.bash;\
-	roslaunch rotors_gazebo spawn_mav.launch mav_name:=${MAV_NAME} namespace:=${NAMESPACE}${robotID} robotID:=${robotID} x:=${X} y:=${Y} z:=${Z};"
+	roslaunch rotors_gazebo my_mav.launch mav_name:=${MAV_NAME} namespace:=${NAMESPACE}${robotID} robotID:=${robotID} gui:=${GUI} world_name:=${WORLD} x:=${X} y:=${Y} z:=${Z};"
 sleep 10
 
 
-echo "---- Spawn Drone_${robotID} Complete ----"
+echo "---- Spawn DRONE_${robotID} Complete ----"

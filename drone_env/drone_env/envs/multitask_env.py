@@ -33,7 +33,7 @@ class MultiTaskEnv(BaseEnv):
         )
         config["target"].update(
             {
-                "type": "RandomGoal",
+                "type": "FixedGoal",
                 "target_name_space": "goal_",
             }
         )
@@ -82,6 +82,18 @@ class MultiTaskEnv(BaseEnv):
         obs, obs_info = self.observation_type.observe()
         self.obs, self.obs_info = obs, obs_info
         return obs
+
+    def _sample_new_goal(self):
+        if self.config["target"]["type"] == "MultiGoal" and self.config["target"].get(
+            "enable_random_goal", True
+        ):
+            n_waypoints = np.random.randint(4, 8)
+            self.target_type.sample_new_wplist(n_waypoints=n_waypoints)
+        elif self.config["target"]["type"] == "RandomGoal":
+            pos = self.config["simulation"]["position"]
+            self.target_type.sample_new_goal(origin=np.array([pos[1], pos[0], -pos[2]]))
+        elif self.config["target"]["type"] == "FixedGoal":
+            self.target_type.sample_new_goal()
 
     def one_step(
         self,
@@ -196,6 +208,25 @@ class MultiTaskEnv(BaseEnv):
             <= self.config["success_threshhold"]
             else 0.0
         )
+
+    def _is_terminal(self, obs_info: dict) -> bool:
+        """if episode terminate
+        - time: episode duration finished
+
+        Returns:
+            bool: [episode terminal or not]
+        """
+        time = False
+        if self.config["duration"] is not None:
+            time = self.steps >= int(self.config["duration"]) - 1
+
+        success = False
+
+        fail = False
+        if obs_info["obs_dict"]["position"][2] >= -5.0:
+            fail = True
+
+        return time or success or fail
 
 
 if __name__ == "__main__":

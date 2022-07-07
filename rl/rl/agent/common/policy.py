@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from .util import get_sa_pairs
+import numpy as np
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -35,7 +36,8 @@ class StochasticPolicy(nn.Module):
         return x
 
     def get_action(self, observation):
-        observation = torch.tensor(observation, dtype=torch.float32).to(device)
+        if isinstance(observation, np.ndarray):
+            observation = torch.tensor(observation, dtype=torch.float32).to(device)
         return self.get_actions(observation).squeeze(0)[0].cpu().detach().numpy()
 
     def get_actions(self, observations):
