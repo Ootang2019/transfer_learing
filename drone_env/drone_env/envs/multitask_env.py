@@ -26,7 +26,7 @@ class MultiTaskEnv(BaseEnv):
         )
         config["action"].update(
             {
-                "type": "ContinuousAngularAction",
+                "type": "ContinuousVirtualAction",
                 "act_noise_stdv": 0.05,
                 "max_thrust": 1.0,
             }
@@ -44,17 +44,44 @@ class MultiTaskEnv(BaseEnv):
                 "policy_frequency": 50,  # [hz]
                 "success_threshhold": 5,  # [meters]
                 "tasks": {
-                    "orientation": np.array([0.0, 0.0, 0.0, 0.0]),
-                    "angvel_diff": np.array([0.0, 0.0, 0.0]),
-                    "position": np.array([0.5, 0.0, 0.0]),
-                    "vel_diff": np.array([0.5, 0.0, 0.0]),
-                    "vel_norm_diff": np.array([0.0]),
-                    "action": np.array([0.0]),
+                    "tracking": {
+                        "ori_diff": np.array([0.0, 0.0, 0.0, 0.0]),
+                        "ang_diff": np.array([0.0, 0.0, 0.0]),
+                        "angvel_diff": np.array([0.0, 0.0, 0.0]),
+                        "pos_diff": np.array([0.5, 0.0, 0.0]),
+                        "vel_diff": np.array([0.5, 0.0, 0.0]),
+                        "vel_norm_diff": np.array([0.0]),
+                    },
                     "success": np.array([0.0]),
+                    "action": np.array([0.0]),
                 },
             }
         )
         return config
+
+    def __init__(self, config: Optional[Dict[Any, Any]] = None) -> None:
+        super().__init__(config)
+        self.tasks = self.config["tasks"]
+        self.tracking_feature_len = np.concatenate(
+            [v for k, v in self.tasks["tracking"].items()]
+        ).shape[0]
+        self.feature_len = (
+            self.tracking_feature_len
+            + self.tasks["success"].shape[0]
+            + self.tasks["action"].shape[0]
+        )
+        self.obs, self.obs_info = None, None
+
+    def reset(self) -> Observation:
+        self.steps = 0
+        self.done = False
+        self._reset()
+
+        self._sample_new_goal()
+
+        obs, obs_info = self.observation_type.observe()
+        self.obs, self.obs_info = obs, obs_info
+        return obs
 
     def one_step(
         self,
@@ -64,7 +91,6 @@ class MultiTaskEnv(BaseEnv):
 
         Args:
             action (Action): action from the agent [-1,1] with size (4,)
-            tasks (dict): define current task
 
         Returns:
             Tuple[Observation, float, bool, dict]:
@@ -75,14 +101,19 @@ class MultiTaskEnv(BaseEnv):
         """
         self._simulate(action)
         obs, obs_info = self.observation_type.observe()
-        reward, reward_info = self._reward(obs.copy(), action, copy.deepcopy(obs_info))
+        self.obs, self.obs_info = obs, obs_info
+        (reward, reward_info) = self._reward(
+            obs.copy(), action, copy.deepcopy(obs_info)
+        )
         terminal = self._is_terminal(copy.deepcopy(obs_info))
         info = {
             "step": self.steps,
             "obs": obs,
             "obs_info": obs_info,
             "act": action,
+            "tasks": self.tasks,
             "reward": reward,
+            "features": reward_info["features"],
             "reward_info": reward_info,
             "terminal": terminal,
         }
@@ -113,27 +144,105 @@ class MultiTaskEnv(BaseEnv):
         Returns:
             Tuple[float, dict]: [reward scalar and a detailed reward info]
         """
-        tasks = self.config["tasks"]
-        track_weights = np.concatenate(
-            [
-                tasks["orientation"],
-                tasks["angvel_diff"],
-                tasks["position"],
-                tasks["vel_diff"],
-                tasks["vel_norm_diff"],
-            ]
-        )
-
-        success_reward = tasks["success"] * self.compute_success_rew(
-            obs_info["position"], obs_info["goal_dict"]["position"]
-        )
-        tracking_reward = np.dot(track_weights, -np.abs(obs[0:14]))
-        action_reward = tasks["action"] * self.action_type.action_rew()
-
-        reward = success_reward + tracking_reward + action_reward
+        weights = self.get_tasks_weights()
+        features = self.compute_features(obs, obs_info)
+        reward = np.dot(weights, features)
         reward = np.clip(reward, -1, 1)
         reward_info = {
-            "rew_info": (reward, success_reward, tracking_reward, action_reward)
+            "reward": reward,
+            "features": features,
+            "tasks": self.tasks,
         }
 
         return float(reward), reward_info
+
+    def get_tasks_weights(self):
+        tasks = self.tasks.copy()
+        feature_weights = np.concatenate([v for k, v in tasks["tracking"].items()])
+        return np.concatenate([feature_weights, tasks["success"], tasks["action"]])
+
+    def get_features(self):
+        return self.compute_features(self.obs, self.obs_info)
+
+    def compute_features(self, obs, obs_info):
+        tracking_features = -np.abs(obs[0 : self.tracking_feature_len])
+        success_features = self.compute_success_feature(
+            obs_info["obs_dict"]["position"], obs_info["goal_dict"]["position"]
+        )
+        action_features = np.array([self.action_type.action_rew()])
+        features = np.concatenate(
+            [tracking_features, success_features, action_features]
+        )
+        return features
+
+    def compute_success_feature(self, pos: np.array, goal_pos: np.array) -> float:
+        pos_success = self.position_task_successs(pos, goal_pos)
+        return np.array([pos_success])
+
+    def position_task_successs(self, pos: np.array, goal_pos: np.array) -> float:
+        """task success if distance to goal is less than sucess_threshhold
+
+        Args:
+            pos ([np.array]): [position of machine]
+            goal_pos ([np.array]): [position of planar goal]
+            k (float): scaler for success
+
+        Returns:
+            [float]: [1 if success, otherwise 0]
+        """
+        return (
+            1.0
+            if np.linalg.norm(pos[0:3] - goal_pos[0:3])
+            <= self.config["success_threshhold"]
+            else 0.0
+        )
+
+
+if __name__ == "__main__":
+    import copy
+    from drone_env.envs.common.gazebo_connection import GazeboConnection
+    from drone_env.envs.script import close_simulation
+
+    # ============== profile ==============#
+    # pip install snakeviz
+    # python -m cProfile -o out.profile drone_env/drone_env/envs/multitask_env.py -s time
+    # snakeviz multitask_env.profile
+
+    auto_start_simulation = False
+    if auto_start_simulation:
+        close_simulation()
+
+    ENV = MultiTaskEnv
+    env_kwargs = {
+        "DBG": True,
+        "simulation": {
+            "gui": True,
+            "enable_meshes": True,
+            "auto_start_simulation": auto_start_simulation,
+            "position": (0, 0, 30),  # initial spawned position
+        },
+        "observation": {
+            "DBG_ROS": False,
+            "DBG_OBS": False,
+            "noise_stdv": 0.02,
+        },
+        "action": {
+            "DBG_ACT": False,
+            "act_noise_stdv": 0.05,
+        },
+        "target": {
+            "DBG_ROS": False,
+        },
+    }
+
+    def env_step():
+        env = ENV(copy.deepcopy(env_kwargs))
+        env.reset()
+        for _ in range(100000):
+            action = env.action_space.sample()
+            action = np.zeros_like(action)
+            obs, reward, terminal, info = env.step(action)
+
+        GazeboConnection().unpause_sim()
+
+    env_step()

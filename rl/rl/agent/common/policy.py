@@ -1,22 +1,25 @@
 import torch
 import torch.nn as nn
-import numpy
-import line_profiler
-from util import get_sa_pairs
+from .util import get_sa_pairs
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
 class StochasticPolicy(nn.Module):
     """Stochastic NN policy"""
 
     def __init__(
-        self, observation_dim, action_dim, sizes=[64, 64], squash=True, device="cpu"
+        self,
+        observation_dim,
+        action_dim,
+        sizes=[64, 64],
+        squash=True,
     ):
         super().__init__()
         self.observation_dim = observation_dim
         self.action_dim = action_dim
         self.sizes = sizes
         self.squash = squash
-        self.device = device
 
         self.fc1 = nn.Linear(self.observation_dim + self.action_dim, sizes[0])
         self.fc2 = nn.Linear(sizes[0], sizes[1])
@@ -32,7 +35,7 @@ class StochasticPolicy(nn.Module):
         return x
 
     def get_action(self, observation):
-        observation = torch.tensor(observation, dtype=torch.float32).to(self.device)
+        observation = torch.tensor(observation, dtype=torch.float32).to(device)
         return self.get_actions(observation).squeeze(0)[0].cpu().detach().numpy()
 
     def get_actions(self, observations):
@@ -46,7 +49,7 @@ class StochasticPolicy(nn.Module):
             n_state_samples = 1
 
         latent_shape = (n_action_samples, self.action_dim)
-        latents = torch.normal(0, 1, size=latent_shape).to(self.device)
+        latents = torch.normal(0, 1, size=latent_shape).to(device)
 
         s_a = get_sa_pairs(observations, latents)
         raw_actions = self.forward(s_a).view(

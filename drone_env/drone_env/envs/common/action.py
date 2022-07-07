@@ -228,8 +228,14 @@ class ContinuousAction(ROSActionType):
         )
 
 
-class ContinuousAngularAction(ContinuousAction):
-    """control row, pitch, yaw, thrust"""
+class ContinuousVirtualAction(ContinuousAction):
+    """ "+" configuration
+    action channel
+    0: row
+    1: pitch
+    2: yaw
+    3: thrust
+    """
 
     def mixer(self, action: np.array):
         row, pitch, yaw, thrust = action
@@ -240,9 +246,18 @@ class ContinuousAngularAction(ContinuousAction):
         return np.array([m0, m1, m2, m3])
 
     def process_action(self, action: np.array, noise_stdv: float = 0):
-        action = self.mixer(action)
-        action += np.random.normal(0, noise_stdv, action.shape)
-        proc = np.clip(action, 0, self.max_thrust)
+        """convert action to motor command
+
+        Args:
+            action (np.array): [row, pitch, yaw, thrust]
+            noise_stdv (float, optional): action noise. Defaults to 0.
+
+        Returns:
+            proc (np.array): processed action command
+        """
+        actuator = self.mixer(action)
+        actuator += np.random.normal(0, noise_stdv, actuator.shape)
+        proc = np.clip(actuator, 0, self.max_thrust)
         proc = utils.lmap(proc, [-1, 1], self.act_range)
         proc = proc.reshape(self.act_dim, 1)
         return proc
@@ -360,8 +375,8 @@ def action_factory(  # pylint: disable=too-many-return-statements
     """control action type"""
     if config["type"] == "ContinuousAction":
         return ContinuousAction(env, **config)
-    elif config["type"] == "ContinuousAngularAction":
-        return ContinuousAngularAction(env, **config)
+    elif config["type"] == "ContinuousVirtualAction":
+        return ContinuousVirtualAction(env, **config)
     elif config["type"] == "ContinuousDifferentialAction":
         return ContinuousDifferentialAction(env, **config)
     else:

@@ -5,3 +5,8 @@ register(
     id="base-v0",
     entry_point="drone_env.envs:BaseEnv",
 )
+
+register(
+    id="multitask-v0",
+    entry_point="drone_env.envs:MultiTaskEnv",
+)

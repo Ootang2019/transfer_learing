@@ -1,66 +1,21 @@
 import datetime
-import pickle
 from pathlib import Path
 import os.path
-import gym
 import numpy as np
 import torch
 import torch.nn.functional as F
 import wandb
-from kernel import adaptive_isotropic_gaussian_kernel
-from policy import StochasticPolicy
-from replay_buffer import ReplayBuffer
-from util import assert_shape, get_sa_pairs, get_sa_pairs_
-from value_function import SoftQNetwork
-import cProfile
+from common.kernel import adaptive_isotropic_gaussian_kernel
+from common.policy import StochasticPolicy
+from common.replay_buffer import ReplayBuffer
+from common.util import assert_shape, get_sa_pairs, get_sa_pairs_
+from common.value_function import MLP
+from common.agent import AbstractAgent
 
 torch.autograd.set_detect_anomaly(True)  # detect NaN
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 EPS = 1e-6
-
-
-class AbstractAgent:
-    def __init__(
-        self,
-        env: str,
-        env_kwargs: dict = {},
-        total_timesteps=1e6,
-        n_timesteps=200,
-        reward_scale: float = 1,
-        replay_buffer_size: int = 1e6,
-        mini_batch_size: int = 128,
-        min_n_experience: int = 1024,  # minimum number of training experience
-        save_path: str = "./",
-        render: bool = False,
-    ):
-        self.save_path = save_path
-
-        self.env = gym.make(env, **env_kwargs)
-        self.observation_dim = self.env.observation_space.shape[0]
-        self.action_dim = self.env.action_space.shape[0]
-        self.render = render
-
-        self.total_timesteps = int(total_timesteps)
-        self.n_timesteps = int(n_timesteps)
-        self.reward_scale = reward_scale
-        self.replay_buffer_size = int(replay_buffer_size)
-        self.mini_batch_size = int(mini_batch_size)
-        self.min_n_experience = int(min_n_experience)
-
-    def train(self):
-        raise NotImplementedError
-
-    def save_config(self, config):
-        config = dict(config)
-        Path(self.save_path).mkdir(parents=True, exist_ok=True)
-        with open(self.save_path + "/config.pkl", "wb") as f:
-            pickle.dump(config, f)
-
-    def load_config(self, path):
-        with open(path + "/config.pkl", "rb") as f:
-            config = pickle.load(f)
-        return config
 
 
 class SQLAgent(AbstractAgent):
@@ -123,17 +78,15 @@ class SQLAgent(AbstractAgent):
         self.kernel_update_ratio = kernel_update_ratio
 
         self.net_kwargs = net_kwargs
-        self.behavior_net = SoftQNetwork(
+        self.behavior_net = MLP(
             observation_dim=self.observation_dim,
             action_dim=self.action_dim,
-            alpha=self.alpha,
             sizes=net_kwargs.get("value_sizes", [64, 64]),
         ).to(device)
 
-        self.target_net = SoftQNetwork(
+        self.target_net = MLP(
             observation_dim=self.observation_dim,
             action_dim=self.action_dim,
-            alpha=self.alpha,
             sizes=net_kwargs.get("value_sizes", [64, 64]),
         ).to(device)
         self.target_net.load_state_dict(self.behavior_net.state_dict())
@@ -149,8 +102,6 @@ class SQLAgent(AbstractAgent):
         self.policy_optimizer = torch.optim.Adam(
             self.policy.parameters(), lr=self.policy_lr
         )
-
-        self.replay_buffer = ReplayBuffer(self.replay_buffer_size)
 
     def train(self):
         episode_reward = 0
@@ -233,7 +184,7 @@ class SQLAgent(AbstractAgent):
         # eqn10: Q(s,a)
         s_a = get_sa_pairs(batch_next_state, sample_action)
         q_value_target = self.target_net(s_a).view(batch_next_state.shape[0], -1)
-        q_value_target *= 1 / self.alpha
+        q_value_target /= self.alpha
 
         assert_shape(q_value_target, [None, self.value_n_particles])
 
@@ -272,9 +223,6 @@ class SQLAgent(AbstractAgent):
             "q_std": q_value.std(),
             "v_mean": next_value.mean(),
             "target": target.mean(),
-            "reward_0": batch_reward[0],
-            "value_0": next_value[0],
-            "target_0": target[0],
         }
         wandb.log(metrics)
 
@@ -326,7 +274,6 @@ class SQLAgent(AbstractAgent):
             updated_actions,
             self.policy.parameters(),
             grad_outputs=action_gradients,
-            # create_graph=True,
         )
 
         # multiply weight since optimizer will differentiate it later so we can apply the gradient
@@ -370,16 +317,14 @@ class SQLAgent(AbstractAgent):
         )
 
     def load_model(self, path):
-        self.behavior_net = SoftQNetwork(
+        self.behavior_net = MLP(
             observation_dim=self.observation_dim,
             action_dim=self.action_dim,
-            alpha=self.alpha,
             sizes=self.net_kwargs.get("value_sizes", [64, 64]),
         ).to(device)
-        self.target_net = SoftQNetwork(
+        self.target_net = MLP(
             observation_dim=self.observation_dim,
             action_dim=self.action_dim,
-            alpha=self.alpha,
             sizes=self.net_kwargs.get("value_sizes", [64, 64]),
         ).to(device)
         self.policy = StochasticPolicy(

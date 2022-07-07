@@ -4,7 +4,7 @@
 from __future__ import absolute_import, division, print_function
 
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-
+import pprint
 import numpy as np
 import rospy
 from drone_env.envs.common.abstract import ROSAbstractEnv
@@ -14,7 +14,7 @@ from std_msgs.msg import Float32MultiArray
 from drone_env.envs.script import close_simulation
 import copy
 
-
+pp = pprint.PrettyPrinter(depth=4)
 Observation = Union[np.ndarray, float]
 
 
@@ -34,7 +34,7 @@ class BaseEnv(ROSAbstractEnv):
         )
         config["action"].update(
             {
-                "type": "ContinuousAngularAction",
+                "type": "ContinuousVirtualAction",
                 "act_noise_stdv": 0.05,
                 "max_thrust": 1.0,
             }
@@ -54,8 +54,8 @@ class BaseEnv(ROSAbstractEnv):
                     [100, 0.8, 0.2]
                 ),  # success, tracking, action
                 "tracking_reward_weights": np.array(
-                    [0, 0, 0, 0, 0, 0, 0, 0.25, 0.25, 0.25, 0, 0, 0, 0.25]
-                ),  # ("ori_diff", "angvel_diff", "pos_diff", "vel_diff", "vel_norm_diff")
+                    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.25, 0.25, 0.25, 0, 0, 0, 0.25]
+                ),  # ("ori_diff", "ang_diff", "angvel_diff", "pos_diff", "vel_diff", "vel_norm_diff")
                 "success_threshhold": 5,  # [meters]
             }
         )
@@ -128,12 +128,12 @@ class BaseEnv(ROSAbstractEnv):
         Args:
             info ([dict]): [dict contain all step information]
         """
-        obs_info = info["obs_info"]
-        proc_info = obs_info["proc_dict"]
+        obs_info = info["obs_info"]["obs_dict"]
+        proc_info = info["obs_info"]["proc_dict"]
 
-        self.rew_rviz_pub.publish(
-            Float32MultiArray(data=np.array(info["reward_info"]["rew_info"]))
-        )
+        # self.rew_rviz_pub.publish(
+        #     Float32MultiArray(data=np.array(info["reward_info"]["rew_info"]))
+        # )
         self.state_rviz_pub.publish(
             Float32MultiArray(
                 data=np.concatenate(
@@ -161,10 +161,8 @@ class BaseEnv(ROSAbstractEnv):
         self.pos_cmd_pub.publish(Point(*self.goal["position"]))
 
         if self.dbg:
-            print(
-                f"================= [ PlanarNavigateEnv ] step {self.steps} ================="
-            )
-            print("STEP INFO:", info)
+            print(f"================= [ ENV ] step {self.steps} =================")
+            pp.pprint(info)
             print("\r")
 
     def reset(self) -> Observation:
@@ -214,7 +212,7 @@ class BaseEnv(ROSAbstractEnv):
         success_reward = self.compute_success_rew(
             obs_info["position"], obs_info["goal_dict"]["position"]
         )
-        tracking_reward = np.dot(track_weights, -np.abs(obs[0:14]))
+        tracking_reward = np.dot(track_weights, -np.abs(obs[0:17]))
         action_reward = self.action_type.action_rew()
 
         reward = np.dot(
@@ -265,7 +263,7 @@ class BaseEnv(ROSAbstractEnv):
             success = self.target_type.wp_index == self.target_type.wp_max_index
         else:
             success_reward = self.compute_success_rew(
-                obs_info["position"], obs_info["goal_dict"]["position"]
+                obs_info["obs_dict"]["position"], obs_info["goal_dict"]["position"]
             )
             success = success_reward >= 0.99
 

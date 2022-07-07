@@ -2,8 +2,10 @@
 """ environment abstract """
 from __future__ import absolute_import, division, print_function
 
-import os, sys
+import os
+import pprint
 import socket
+import sys
 import time
 from copy import deepcopy
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -18,11 +20,12 @@ from drone_env.envs.common.observation import ObservationType, observation_facto
 from drone_env.envs.common.target import TargetType, target_factory
 from drone_env.envs.common.utils import update_dict
 from drone_env.envs.script.drone_script import (
-    spawn_simulation_on_different_port,
     kill_screens,
+    spawn_simulation_on_different_port,
 )
 from gym.utils import seeding
 
+pp = pprint.PrettyPrinter(depth=4)
 Observation = Union[np.ndarray, float]
 Target = Union[np.ndarray, float]
 
@@ -211,7 +214,7 @@ class ROSAbstractEnv(AbstractEnv):
         if self.config["simulation"]["auto_start_simulation"]:
             self.setup_env(int(self.config["robot_id"]))
 
-        print(self.config)
+        pp.pprint(self.config)
         self.dbg = self.config["DBG"]
 
         rospy.loginfo("[ RL Node " + str(self.config["robot_id"]) + " ] Initialize...")

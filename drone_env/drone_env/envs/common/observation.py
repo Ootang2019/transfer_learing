@@ -146,7 +146,7 @@ class ROSObservation(ObservationType):
         self.prev_pos_data = self.to_NED(self.pos_data.copy())
         self.pos_data = self.to_NED(utils.obj2array(msg.position))
         self.ori_data = utils.obj2array(msg.orientation)
-        self.ang_data = quat2euler(self.ori_data)
+        self.ang_data = np.array(quat2euler(self.ori_data))
         self.vel_data = (self.pos_data - self.prev_pos_data) / self.pose_deltaT
         self.vel_data = self.to_NED(self.vel_data)
 
@@ -234,33 +234,39 @@ class KinematicsObservation(ROSObservation):
 
     OBS = [
         "ori_diff",  # 4
+        "ang_diff",  # 3
         "angvel_diff",  # 3
         "pos_diff",  # 3
         "vel_diff",  # 3
         "vel_norm_diff",  # 1
         "ori",  # 4
+        "ang",  # 3
         "angvel",  # 3
         "pos",  # 3
         "vel",  # 3
         "acc",  # 3
         "goal_ori",  # 4
+        "goal_ang",  # 3
         "goal_angvel",  # 3
         "goal_pos",  # 3
         "goal_vel",  # 3
     ]
-    OBS_DIM = 43
+    OBS_DIM = 52
     OBS_RANGE = {
         "ori_diff": [-1, 1],
+        "ang_diff": [-np.pi, np.pi],
         "angvel_diff": [-50, 50],
         "pos_diff": [-50, 50],
         "vel_diff": [-50, 50],
         "vel_norm_diff": [-50, 50],
         "ori": [-1, 1],
+        "ang": [-np.pi, np.pi],
         "angvel": [-50, 50],
         "pos": [-50, 50],
         "vel": [-50, 50],
         "acc": [-50, 50],
         "goal_ori": [-1, 1],
+        "goal_ang": [-np.pi, np.pi],
         "goal_angvel": [-50, 50],
         "goal_pos": [-50, 50],
         "goal_vel": [-50, 50],
@@ -304,43 +310,46 @@ class KinematicsObservation(ROSObservation):
             "angular_velocity": self.ang_vel_data,
         }
 
-        processed_dict = self.process_obs(obs_dict, goal_dict, self.scale_obs)
+        proc_dict = self.process_obs(obs_dict, goal_dict, self.scale_obs)
 
         actuator = self.env.action_type.get_cur_act()[self.actuator_list]
-        processed_dict.update({"actuator": actuator})
+        proc_dict.update({"actuator": actuator})
 
-        proc_df = pd.DataFrame.from_records([processed_dict])
+        proc_df = pd.DataFrame.from_records([proc_dict])
         processed = np.hstack(proc_df[self.obs_name].values[0])
 
-        obs_dict.update({"goal_dict": goal_dict})
-        obs_dict.update({"proc_dict": processed_dict})
+        obs_info = dict(obs_dict=obs_dict, goal_dict=goal_dict, proc_dict=proc_dict)
 
         if self.dbg_obs:
             print("[ observation ] state", processed)
-            print("[ observation ] obs dict", obs_dict)
+            print("[ observation ] obs obs_info", obs_info)
 
-        return processed, obs_dict
+        return processed, obs_info
 
     def process_obs(
         self, obs_dict: dict, goal_dict: dict, scale_obs: bool = True
     ) -> dict:
         (
             obs_ori,
+            obs_ang,
             obs_angvel,
             obs_pos,
             obs_vel,
             obs_acc,
             goal_ori,
+            goal_ang,
             goal_angvel,
             goal_pos,
             goal_vel,
         ) = (
             obs_dict["orientation"],
+            obs_dict["angle"],
             obs_dict["angular_velocity"],
             obs_dict["position"],
             obs_dict["velocity"],
             obs_dict["linear_acceleration"],
             goal_dict["orientation"],
+            goal_dict["angle"],
             goal_dict["angular_velocity"],
             goal_dict["position"],
             goal_dict["velocity"],
@@ -348,16 +357,19 @@ class KinematicsObservation(ROSObservation):
 
         state_dict = {
             "ori_diff": obs_ori - goal_ori,
+            "ang_diff": self.compute_ang_diff(obs_ang - goal_ang),
             "angvel_diff": obs_angvel - goal_angvel,
             "pos_diff": obs_pos - goal_pos,
             "vel_diff": obs_vel - goal_vel,
             "vel_norm_diff": np.linalg.norm(obs_vel - goal_vel),
             "ori": obs_ori,
+            "ang": obs_ang,
             "angvel": obs_angvel,
             "pos": obs_pos,
             "vel": obs_vel,
             "acc": obs_acc,
             "goal_ori": goal_ori,
+            "goal_ang": goal_ang,
             "goal_angvel": goal_angvel,
             "goal_pos": goal_pos,
             "goal_vel": goal_vel,
@@ -375,6 +387,11 @@ class KinematicsObservation(ROSObservation):
             proc = np.clip(proc, -1, 1)
             state_dict[key] = proc
         return state_dict
+
+    def compute_ang_diff(self, ang_diff):
+        ang_diff[ang_diff > np.pi] -= 2 * np.pi
+        ang_diff[ang_diff < -np.pi] += 2 * np.pi
+        return np.array(ang_diff)
 
 
 class PlanarKinematicsObservation(ROSObservation):
@@ -425,15 +442,15 @@ class PlanarKinematicsObservation(ROSObservation):
         }
 
         goal_dict = self.env.goal
-        processed_dict = self.process_obs(obs_dict, goal_dict, self.scale_obs)
+        proc_dict = self.process_obs(obs_dict, goal_dict, self.scale_obs)
 
         actuator = self.env.action_type.get_cur_act()[self.actuator_list]
-        processed_dict.update({"actuator": actuator})
+        proc_dict.update({"actuator": actuator})
 
-        proc_df = pd.DataFrame.from_records([processed_dict])
+        proc_df = pd.DataFrame.from_records([proc_dict])
         processed = np.hstack(proc_df[self.obs_name].values[0])
 
-        obs_dict.update({"proc_dict": processed_dict})
+        obs_dict.update({"proc_dict": proc_dict})
         obs_dict.update({"goal_dict": goal_dict})
 
         if self.dbg_obs:
