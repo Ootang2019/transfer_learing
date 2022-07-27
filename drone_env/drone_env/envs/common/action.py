@@ -75,7 +75,7 @@ class ROSActionType(ActionType):
         self.actuator_name_space = self.name_space + "/command/motor_speed"
 
         self.act_dim = 4
-        self.cur_act = self.init_act = 0.437 * np.ones(self.act_dim)
+        self.cur_act = self.init_act = np.zeros(self.act_dim)
 
         self._create_pub_and_sub()
 
@@ -138,7 +138,7 @@ class ContinuousAction(ROSActionType):
     3: m3
     """
 
-    ACTION_RANGE = (-1000, 1000)
+    ACTUATOR_RANGE = (0, 800)
 
     def __init__(
         self,
@@ -159,7 +159,7 @@ class ContinuousAction(ROSActionType):
         self.dbg_act = DBG_ACT
 
         self.act_dim = 4
-        self.act_range = self.ACTION_RANGE
+        self.act_range = self.ACTUATOR_RANGE
         self.act_noise_stdv = act_noise_stdv
         self.max_thrust = max_thrust
 
@@ -176,10 +176,10 @@ class ContinuousAction(ROSActionType):
         """map agent action to actuator specification
 
         Args:
-            action ([np.array]): agent action
+            action ([np.array]): agent action [-1, 1]
 
         Returns:
-            [np.array]: formated action with 4 channels
+            [np.array]: formated action with 4 channels [0, 1000]
         """
         action += np.random.normal(0, noise_stdv, action.shape)
         proc = np.clip(action, 0, self.max_thrust)
@@ -257,7 +257,7 @@ class ContinuousVirtualAction(ContinuousAction):
         """
         actuator = self.mixer(action)
         actuator += np.random.normal(0, noise_stdv, actuator.shape)
-        proc = np.clip(actuator, 0, self.max_thrust)
+        proc = np.clip(actuator, -1, self.max_thrust)
         proc = utils.lmap(proc, [-1, 1], self.act_range)
         proc = proc.reshape(self.act_dim, 1)
         return proc

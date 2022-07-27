@@ -164,7 +164,7 @@ class ROSAbstractEnv(AbstractEnv):
                     "auto_start_simulation": True,
                     "maximum_local_worker": 8,
                     "position": (0, 0, 25),  # initial spawned position
-                    "simulation_time_step": 0.005,
+                    "simulation_time_step": 0.005,  # 0.005 for 5x speed
                     "spawn_fn": spawn_drone_sim,
                 },
                 "observation": {

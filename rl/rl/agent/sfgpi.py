@@ -25,7 +25,7 @@ class SFGPI(AbstractAgent):
     @classmethod
     def default_config(cls):
         return dict(
-            total_timesteps=1e6,
+            total_timesteps=5e4,
             n_timesteps=200,
             reward_scale=1,
             replay_buffer_size=1e6,
@@ -37,10 +37,10 @@ class SFGPI(AbstractAgent):
             td_target_update_interval=1,
             value_n_particles=96,
             policy_lr=5e-3,
-            action_n_particles=56,
+            action_n_particles=64,
             kernel_update_ratio=0.5,
             render=False,
-            net_kwargs={"value_sizes": [64, 64], "policy_sizes": [32, 32]},
+            net_kwargs={"value_sizes": [32, 32], "policy_sizes": [16, 16]},
             env_kwargs={},
         )
 
@@ -396,14 +396,14 @@ class SFGPI(AbstractAgent):
 
 
 if __name__ == "__main__":
-    from drone_env.envs.multitask_env import MultiTaskEnv
+    from drone_env.envs.multitask_env import MultiTaskEnv, MultiTaskPIDEnv
     from drone_env.envs.script import close_simulation
 
-    auto_start_simulation = False
+    auto_start_simulation = True
     if auto_start_simulation:
         close_simulation()
 
-    ENV = MultiTaskEnv
+    ENV = MultiTaskPIDEnv
     env_name = ENV.__name__
     env_kwargs = {
         "DBG": False,
@@ -411,14 +411,20 @@ if __name__ == "__main__":
             "gui": True,
             "enable_meshes": True,
             "auto_start_simulation": auto_start_simulation,
-            "position": (0, 0, 30),  # initial spawned position
+            "position": (0, 0, 20.0),  # initial spawned position
+        },
+        "observation": {
+            "noise_stdv": 0.0,
+        },
+        "action": {
+            "act_noise_stdv": 0.0,
         },
         "tasks": {
             "tracking": {
                 "ori_diff": np.array([0.0, 0.0, 0.0, 0.0]),
-                "ang_diff": np.array([0.25, 0.25, 0.0]),
+                "ang_diff": np.array([0.0, 0.0, 0.0]),
                 "angvel_diff": np.array([0.0, 0.0, 0.0]),
-                "pos_diff": np.array([0.15, 0.15, 0.2]),
+                "pos_diff": np.array([0.0, 0.0, 1]),
                 "vel_diff": np.array([0.0, 0.0, 0.0]),
                 "vel_norm_diff": np.array([0.0]),
             },
@@ -431,13 +437,7 @@ if __name__ == "__main__":
     save_path = os.path.expanduser(save_path)
 
     default_dict = SFGPI.default_config()
-    default_dict.update(
-        dict(
-            env_kwargs=env_kwargs,
-            save_path=save_path,
-            alpha=0.1,
-        )
-    )
+    default_dict.update(dict(env_kwargs=env_kwargs, save_path=save_path))
 
     env = ENV(copy.deepcopy(env_kwargs))
 

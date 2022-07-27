@@ -50,7 +50,7 @@ class ROSObservation(ObservationType):
         DBG_ROS=False,
         DBG_OBS=False,
         real_experiment=False,
-        pose_deltaT=1 / 150,  # [sec]
+        pose_deltaT=1 / 50,  # [sec]
         **kwargs,  # pylint: disable=unused-argument
     ):
         super().__init__(env)
@@ -143,12 +143,11 @@ class ROSObservation(ObservationType):
         Args:
             msg ([pose]): pose sensor data
         """
-        self.prev_pos_data = self.to_NED(self.pos_data.copy())
+        self.prev_pos_data = self.pos_data.copy()
         self.pos_data = self.to_NED(utils.obj2array(msg.position))
         self.ori_data = utils.obj2array(msg.orientation)
         self.ang_data = np.array(quat2euler(self.ori_data))
         self.vel_data = (self.pos_data - self.prev_pos_data) / self.pose_deltaT
-        self.vel_data = self.to_NED(self.vel_data)
 
         if self.dbg_ros:
             print(
@@ -257,19 +256,19 @@ class KinematicsObservation(ROSObservation):
         "ang_diff": [-np.pi, np.pi],
         "angvel_diff": [-50, 50],
         "pos_diff": [-50, 50],
-        "vel_diff": [-50, 50],
+        "vel_diff": [-20, 20],
         "vel_norm_diff": [-50, 50],
         "ori": [-1, 1],
         "ang": [-np.pi, np.pi],
         "angvel": [-50, 50],
         "pos": [-50, 50],
-        "vel": [-50, 50],
+        "vel": [-20, 20],
         "acc": [-50, 50],
         "goal_ori": [-1, 1],
         "goal_ang": [-np.pi, np.pi],
         "goal_angvel": [-50, 50],
         "goal_pos": [-50, 50],
-        "goal_vel": [-50, 50],
+        "goal_vel": [-20, 20],
     }
 
     def __init__(

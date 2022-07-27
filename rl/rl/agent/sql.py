@@ -4,12 +4,19 @@ import os.path
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch.optim import Adam
 import wandb
 from common.kernel import adaptive_isotropic_gaussian_kernel
 from common.policy import StochasticPolicy
-from common.replay_buffer import ReplayBuffer
-from common.util import assert_shape, get_sa_pairs, get_sa_pairs_
-from common.value_function import MLP
+from common.util import (
+    assert_shape,
+    get_sa_pairs,
+    get_sa_pairs_,
+    hard_update,
+    to_batch,
+    update_params,
+)
+from common.value_function import QNetwork
 from common.agent import AbstractAgent
 
 torch.autograd.set_detect_anomaly(True)  # detect NaN
@@ -24,152 +31,124 @@ class SQLAgent(AbstractAgent):
     @classmethod
     def default_config(cls):
         return dict(
+            env="InvertedDoublePendulum-v4",
+            env_kwargs={},
             total_timesteps=1e5,
             n_timesteps=200,
             reward_scale=1,
             replay_buffer_size=1e6,
             mini_batch_size=128,
             min_n_experience=1024,
-            lr=0.0004924,
-            alpha=1.2,
+            lr=0.0005,
+            alpha=1.0,
             gamma=0.99,
             td_target_update_interval=1,
-            value_n_particles=88,
-            policy_lr=0.004866,
+            value_n_particles=64,
+            policy_lr=0.005,
             kernel_n_particles=54,
             kernel_update_ratio=0.5,
             render=False,
             net_kwargs={"value_sizes": [64, 64], "policy_sizes": [32, 32]},
-            env_kwargs={},
+            seed=0,
         )
 
     def __init__(
         self,
-        env,
-        lr: float = 1e-3,
-        gamma: float = 0.99,
-        alpha: float = 8,
-        td_target_update_interval: int = 1,
-        value_n_particles: int = 16,
-        policy_lr: float = 1e-3,
-        kernel_n_particles: int = 16,
-        kernel_update_ratio: float = 0.5,
-        net_kwargs: dict = {},
-        env_kwargs: dict = {},
         config: dict = {},
-        **kwargs,
     ) -> None:
         self.config = config
-        super().__init__(env=env, env_kwargs=env_kwargs, **kwargs)
+        super().__init__(**config)
 
         self.learn_steps = 0
-        self.epoch = 0
-
-        self.lr = lr
-        self.gamma = gamma
-        self.alpha = alpha
+        self.episodes = 0
+        self.lr = config.get("lr", 1e-3)
+        self.gamma = config.get("gamma", 0.99)
+        self.alpha = torch.tensor(config.get("alpha", 8)).to(device)
         self.begin_learn_td = False
-        self.td_target_update_interval = int(td_target_update_interval)
-        self.value_n_particles = int(value_n_particles)
-
-        self.policy_lr = policy_lr
+        self.td_target_update_interval = int(config.get("td_target_update_interval", 1))
+        self.value_n_particles = int(config.get("value_n_particles", 16))
+        self.policy_lr = config.get("policy_lr", 1e-3)
         self.kernel_fn = adaptive_isotropic_gaussian_kernel
-        self.kernel_n_particles = int(kernel_n_particles)
-        self.kernel_update_ratio = kernel_update_ratio
+        self.kernel_n_particles = int(config.get("kernel_n_particles", 16))
+        self.kernel_update_ratio = config.get("kernel_update_ratio", 0.5)
+        self.net_kwargs = config["net_kwargs"]
 
-        self.net_kwargs = net_kwargs
-        self.behavior_net = MLP(
+        self.behavior_net = QNetwork(
             observation_dim=self.observation_dim,
             action_dim=self.action_dim,
-            sizes=net_kwargs.get("value_sizes", [64, 64]),
+            sizes=self.net_kwargs.get("value_sizes", [64, 64]),
         ).to(device)
-
-        self.target_net = MLP(
+        self.target_net = QNetwork(
             observation_dim=self.observation_dim,
             action_dim=self.action_dim,
-            sizes=net_kwargs.get("value_sizes", [64, 64]),
+            sizes=self.net_kwargs.get("value_sizes", [64, 64]),
         ).to(device)
-        self.target_net.load_state_dict(self.behavior_net.state_dict())
+        hard_update(self.target_net, self.behavior_net)
 
         self.policy = StochasticPolicy(
             observation_dim=self.observation_dim,
             action_dim=self.action_dim,
-            device=device,
-            sizes=net_kwargs.get("policy_sizes", [64, 64]),
+            sizes=self.net_kwargs.get("policy_sizes", [64, 64]),
         ).to(device)
 
-        self.optimizer = torch.optim.Adam(self.behavior_net.parameters(), lr=self.lr)
-        self.policy_optimizer = torch.optim.Adam(
-            self.policy.parameters(), lr=self.policy_lr
+        self.optimizer = Adam(self.behavior_net.parameters(), lr=self.lr)
+        self.policy_optimizer = Adam(self.policy.parameters(), lr=self.policy_lr)
+
+    def is_update(self):
+        return (
+            self.replay_buffer.size() > self.mini_batch_size
+            and self.steps >= self.start_steps
         )
 
-    def train(self):
+    def run(self):
+        while True:
+            self.train_episode()
+            if self.steps > self.total_timesteps:
+                break
+
+    def train_episode(self):
         episode_reward = 0
-        n_epochs = int(self.total_timesteps / self.n_timesteps)
+        self.episodes += 1
+        episode_steps = 0
+        done = False
+        state = self.env.reset()
 
-        for epoch in range(self.epoch, n_epochs):
-            self.epoch = epoch
-            state = self.env.reset()
-            episode_reward = 0
+        while not done:
+            if self.render:
+                self.env.render()
 
-            for _ in range(self.n_timesteps):
-                if self.render:
-                    self.env.render()
-                action = self.policy.get_action(state)
+            action = self.policy.get_action(state)
+            next_state, reward, done, _ = self.env.step(action)
+            self.steps += 1
+            episode_steps += 1
+            episode_reward += reward
 
-                next_state, reward, done, _ = self.env.step(action)
-                episode_reward += reward
-                self.replay_buffer.add((state, next_state, action, reward, done))
+            self.replay_buffer.add((state, action, reward, next_state, done))
 
-                if self.replay_buffer.size() > self.min_n_experience:
-                    batch = self.sample_minibatch()
-                    self.td_update(batch)
-                    self.svgd_update(batch)
+            if self.is_update():
+                batch = self.sample_minibatch()
+                self.td_update(batch)
+                self.svgd_update(batch)
 
-                if done:
-                    break
+            state = next_state
 
-                state = next_state
-
-            wandb.log({"episode_reward": episode_reward})
-            # wandb.watch(self.behavior_net)
-            # wandb.watch(self.policy)
-
-    def update_target_net(self):
-        self.target_net.load_state_dict(self.behavior_net.state_dict())
+        wandb.log({"episode_reward": episode_reward})
 
     def sample_minibatch(self):
         batch = self.replay_buffer.sample(self.mini_batch_size, False)
-        (
-            batch_state,
-            batch_next_state,
-            batch_action,
-            batch_reward,
-            batch_done,
-        ) = zip(*batch)
-
-        batch_state = torch.FloatTensor(np.array(batch_state)).to(device)
-        batch_next_state = torch.FloatTensor(np.array(batch_next_state)).to(device)
-        batch_action = torch.FloatTensor(np.array(batch_action)).to(device)
-        batch_reward = torch.FloatTensor(np.array(batch_reward)).unsqueeze(1).to(device)
-        batch_done = torch.FloatTensor(np.array(batch_done)).unsqueeze(1).to(device)
-        return batch_state, batch_next_state, batch_action, batch_reward, batch_done
+        return to_batch(*zip(*batch), device)
 
     def td_update(self, batch):
-        if self.begin_learn_td is False:
-            print("begin learning q function")
-            self.begin_learn_td = True
+        self.learn_steps += 1
 
         if self.learn_steps % self.td_target_update_interval == 0:
-            self.update_target_net()
-
-        self.learn_steps += 1
+            hard_update(self.target_net, self.behavior_net)
 
         (
             batch_state,
-            batch_next_state,
             batch_action,
             batch_reward,
+            batch_next_state,
             batch_done,
         ) = batch
         batch_reward *= self.reward_scale
@@ -212,17 +191,15 @@ class SQLAgent(AbstractAgent):
         assert_shape(target, [None])
 
         # eqn 11
-        self.optimizer.zero_grad()
         loss = F.mse_loss(q_value, target)
-        loss.backward()
-        self.optimizer.step()
+        update_params(self.optimizer, self.behavior_net, loss)
 
         metrics = {
-            "loss": loss,
-            "q_mean": q_value.mean(),
-            "q_std": q_value.std(),
-            "v_mean": next_value.mean(),
-            "target": target.mean(),
+            "loss/q": loss,
+            "state/mean_q": q_value.mean(),
+            "state/std_q": q_value.std(),
+            "state/mean_v": next_value.mean(),
+            "state/target": target.mean(),
         }
         wandb.log(metrics)
 
@@ -288,41 +265,39 @@ class SQLAgent(AbstractAgent):
         )
         assert surrogate_loss.requires_grad == True
 
-        self.policy_optimizer.zero_grad()
         loss = -surrogate_loss
-        loss.backward()
-        self.policy_optimizer.step()
+        update_params(self.policy_optimizer, self.policy, loss)
 
         metrics = {
-            "policy_loss": loss,
+            "loss/policy": loss,
         }
         wandb.log(metrics)
 
     def save_model(self):
-        path = self.save_path + "/" + str(self.epoch)
+        path = self.save_path + "/" + str(self.episodes)
         Path(path).mkdir(parents=True, exist_ok=True)
         torch.save(
             {
-                "epoch": self.epoch,
+                "episodes": self.episodes,
                 "model_state_dict": self.behavior_net.state_dict(),
             },
             path + "/value_net.pth",
         )
         torch.save(
             {
-                "epoch": self.epoch,
+                "episodes": self.episodes,
                 "model_state_dict": self.policy.state_dict(),
             },
             path + "/policy_net.pth",
         )
 
     def load_model(self, path):
-        self.behavior_net = MLP(
+        self.behavior_net = QNetwork(
             observation_dim=self.observation_dim,
             action_dim=self.action_dim,
             sizes=self.net_kwargs.get("value_sizes", [64, 64]),
         ).to(device)
-        self.target_net = MLP(
+        self.target_net = QNetwork(
             observation_dim=self.observation_dim,
             action_dim=self.action_dim,
             sizes=self.net_kwargs.get("value_sizes", [64, 64]),
@@ -339,7 +314,7 @@ class SQLAgent(AbstractAgent):
         self.behavior_net.load_state_dict(value_checkpoint["model_state_dict"])
         self.target_net.load_state_dict(self.behavior_net.state_dict())
         self.policy.load_state_dict(policy_checkpoint["model_state_dict"])
-        self.epoch = value_checkpoint["epoch"]
+        self.episodes = value_checkpoint["episodes"]
 
 
 if __name__ == "__main__":
@@ -371,7 +346,7 @@ if __name__ == "__main__":
     wandb.init(config=default_dict)
     print(wandb.config)
 
-    agent = SQLAgent(**wandb.config)
-    agent.train()
+    agent = SQLAgent(wandb.config)
+    agent.run()
     agent.save_config(wandb.config)
     agent.save_model()

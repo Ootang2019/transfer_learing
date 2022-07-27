@@ -1,0 +1,21 @@
+program: rl/rl/agent/sfgpi.py
+method: bayes
+metric:
+  name: episode_reward
+  goal: maximize
+parameters:
+  lr:
+    min: 0.00001
+    max: 0.01
+  policy_lr:
+    min: 0.00001
+    max: 0.01
+  alpha:
+    min: 0.01
+    max: 10.0
+  value_n_particles:
+    min: 1
+    max: 128
+  action_n_particles:
+    min: 1
+    max: 128

@@ -4,6 +4,7 @@ import pickle
 import torch
 import numpy as np
 from .replay_buffer import ReplayBuffer
+from .util import to_batch
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -22,7 +23,11 @@ class AbstractAgent:
         save_path: str = "./",
         render: bool = False,
         replay_buffer=ReplayBuffer,
+        log_interval=10,
+        seed=0,
+        **kwargs,
     ):
+
         self.save_path = save_path
 
         if isinstance(env, str):
@@ -30,16 +35,24 @@ class AbstractAgent:
         else:
             self.env = env
 
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        self.env.seed(seed)
+
         self.observation_dim = self.env.observation_space.shape[0]
         self.action_dim = self.env.action_space.shape[0]
         self.render = render
+        self.log_interval = log_interval
 
+        self.steps = 0
+        self.learn_steps = 0
+        self.episodes = 0
         self.total_timesteps = int(total_timesteps)
-        self.n_timesteps = int(n_timesteps)
+
         self.reward_scale = reward_scale
         self.replay_buffer_size = int(replay_buffer_size)
         self.mini_batch_size = int(mini_batch_size)
-        self.min_n_experience = int(min_n_experience)
+        self.min_n_experience = self.start_steps = int(min_n_experience)
 
         self.replay_buffer = replay_buffer(self.replay_buffer_size)
 
@@ -48,21 +61,7 @@ class AbstractAgent:
 
     def sample_minibatch(self):
         batch = self.replay_buffer.sample(self.mini_batch_size, False)
-        (
-            batch_state,
-            batch_next_state,
-            batch_action,
-            batch_reward,
-            batch_done,
-        ) = zip(*batch)
-
-        return (
-            torch.FloatTensor(np.array(batch_state)).to(device),
-            torch.FloatTensor(np.array(batch_next_state)).to(device),
-            torch.FloatTensor(np.array(batch_action)).to(device),
-            torch.FloatTensor(np.array(batch_reward)).unsqueeze(1).to(device),
-            torch.FloatTensor(np.array(batch_done)).unsqueeze(1).to(device),
-        )
+        return to_batch(*zip(*batch), device)
 
     def save_config(self, config):
         config = dict(config)

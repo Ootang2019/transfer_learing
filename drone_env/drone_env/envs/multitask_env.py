@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import numpy as np
 import rospy
 from drone_env.envs.common.action import Action
+from drone_env.envs.common.teacher import PositionPID, AttitudePID
 from drone_env.envs.base_env import BaseEnv
 import copy
 
@@ -16,7 +17,11 @@ class MultiTaskEnv(BaseEnv):
     @classmethod
     def default_config(cls) -> dict:
         config = super().default_config()
-        config["simulation"].update({})
+        config["simulation"].update(
+            {
+                "simulation_time_step": 0.005,  # 0.001 or 0.005 for 5x speed
+            }
+        )
         config["observation"].update(
             {
                 "type": "Kinematics",
@@ -48,8 +53,8 @@ class MultiTaskEnv(BaseEnv):
                         "ori_diff": np.array([0.0, 0.0, 0.0, 0.0]),
                         "ang_diff": np.array([0.0, 0.0, 0.0]),
                         "angvel_diff": np.array([0.0, 0.0, 0.0]),
-                        "pos_diff": np.array([0.5, 0.0, 0.0]),
-                        "vel_diff": np.array([0.5, 0.0, 0.0]),
+                        "pos_diff": np.array([0.0, 0.0, 1.0]),
+                        "vel_diff": np.array([0.0, 0.0, 0.0]),
                         "vel_norm_diff": np.array([0.0]),
                     },
                     "success": np.array([0.0]),
@@ -223,7 +228,52 @@ class MultiTaskEnv(BaseEnv):
         success = False
 
         fail = False
+        # if obs_info["obs_dict"]["position"][2] >= -5.0:
+        #     fail = True
+
+        return time or success or fail
+
+
+class MultiTaskPIDEnv(MultiTaskEnv):
+    def default_config(cls) -> dict:
+        config = super().default_config()
+        config.update()
+        return config
+
+    def __init__(self, config: Optional[Dict[Any, Any]] = None) -> None:
+        super().__init__(config)
+
+        self.base_ctrl = AttitudePID(delta_t=1 / self.config["policy_frequency"])
+
+    def one_step(self, action: Action) -> Tuple[Observation, float, bool, dict]:
+        obs, obs_info = self.observation_type.observe()
+        base_act = self.base_ctrl.act(obs_info)
+        action[0:3] = base_act[0:3]
+        np.clip(action, -1, 1)
+
+        return super().one_step(action)
+
+    def reset(self) -> Observation:
+        self.base_ctrl.reset()
+        return super().reset()
+
+    def _is_terminal(self, obs_info: dict) -> bool:
+        """if episode terminate
+        - time: episode duration finished
+
+        Returns:
+            bool: [episode terminal or not]
+        """
+        time = False
+        if self.config["duration"] is not None:
+            time = self.steps >= int(self.config["duration"]) - 1
+
+        success = False
+
+        fail = False
         if obs_info["obs_dict"]["position"][2] >= -5.0:
+            fail = True
+        elif obs_info["obs_dict"]["position"][2] <= -100.0:
             fail = True
 
         return time or success or fail
@@ -243,23 +293,23 @@ if __name__ == "__main__":
     if auto_start_simulation:
         close_simulation()
 
-    ENV = MultiTaskEnv
+    ENV = MultiTaskPIDEnv  # MultiTaskEnv
     env_kwargs = {
         "DBG": True,
         "simulation": {
             "gui": True,
             "enable_meshes": True,
             "auto_start_simulation": auto_start_simulation,
-            "position": (0, 0, 30),  # initial spawned position
+            "position": (0, 0, 0.05),  # initial spawned position
         },
         "observation": {
             "DBG_ROS": False,
             "DBG_OBS": False,
-            "noise_stdv": 0.02,
+            "noise_stdv": 0.0,
         },
         "action": {
-            "DBG_ACT": False,
-            "act_noise_stdv": 0.05,
+            "DBG_ACT": True,
+            "act_noise_stdv": 0.01,
         },
         "target": {
             "DBG_ROS": False,
@@ -271,7 +321,7 @@ if __name__ == "__main__":
         env.reset()
         for _ in range(100000):
             action = env.action_space.sample()
-            action = np.zeros_like(action)
+            action = 1 * np.ones_like(action)
             obs, reward, terminal, info = env.step(action)
 
         GazeboConnection().unpause_sim()

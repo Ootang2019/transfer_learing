@@ -3,7 +3,15 @@ import torch
 import torch.nn as nn
 
 
-class MLP(nn.Module):
+class BaseNetwork(nn.Module):
+    def save(self, path):
+        torch.save(self.state_dict(), path)
+
+    def load(self, path):
+        self.load_state_dict(torch.load(path))
+
+
+class QNetwork(BaseNetwork):
     def __init__(
         self, observation_dim, action_dim, sizes=[64, 64], activation=nn.ReLU
     ) -> None:
@@ -24,7 +32,7 @@ class MLP(nn.Module):
         return x
 
 
-class SFMLP(nn.Module):
+class SFMLP(BaseNetwork):
     def __init__(
         self,
         observation_dim,
@@ -50,6 +58,20 @@ class SFMLP(nn.Module):
         x = self.activation(self.fc2(x))
         x = self.fc3(x)
         return x
+
+
+class TwinnedQNetwork(BaseNetwork):
+    def __init__(self, observation_dim, action_dim, sizes=[64, 64], activation=nn.ReLU):
+        super(TwinnedQNetwork, self).__init__()
+
+        self.Q1 = QNetwork(observation_dim, action_dim, sizes, activation)
+        self.Q2 = QNetwork(observation_dim, action_dim, sizes, activation)
+
+    def forward(self, states, actions):
+        x = torch.cat([states, actions], dim=1)
+        q1 = self.Q1(x)
+        q2 = self.Q2(x)
+        return q1, q2
 
 
 if __name__ == "__main__":

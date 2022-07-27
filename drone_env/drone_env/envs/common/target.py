@@ -204,8 +204,8 @@ class FixedGoal(RandomGoal):
         range_dict: dict = dict(
             x_range=(-0, 0),
             y_range=(-0, 0),
-            z_range=(-30, -30),
-            v_range=(-0, 0),
+            z_range=(-10, -10),
+            v_range=(-0.0, -0.0),
             phi_range=(-0, 0),
             the_range=(-0, 0),
             psi_range=(-0, 0),
@@ -231,7 +231,6 @@ class FixedGoal(RandomGoal):
         self.ang_cmd_data = ang_cmd
         self.ori_cmd_data = q_cmd
         self.angvel_cmd_data = angvel_cmd
-
 
 
 class MultiGoal(TargetType):
