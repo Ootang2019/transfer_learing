@@ -1,23 +1,18 @@
-import datetime
-from pathlib import Path
-import os.path
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.optim import Adam
 import wandb
 from common.policy import GaussianPolicy
-from common.replay_buffer import ReplayBuffer
 from common.util import (
     assert_shape,
     hard_update,
     soft_update,
     grad_false,
-    to_batch,
     update_params,
 )
 from common.value_function import TwinnedQNetwork
-from common.agent import AbstractAgent
+from common.agent import BasicAgent
 
 torch.autograd.set_detect_anomaly(True)  # detect NaN
 
@@ -25,30 +20,38 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 EPS = 1e-6
 
 
-class SACAgent(AbstractAgent):
-    """SAC"""
+class SACAgent(BasicAgent):
+    """SAC
+    Tuomas Haarnoja, Soft Actor-Critic: Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor
+    see https://github.com/haarnoja/sac/blob/master/sac/algos/sac.py
+    and https://github.com/ku2482/soft-actor-critic.pytorch
+    """
 
     @classmethod
     def default_config(cls):
         return dict(
             env="InvertedDoublePendulum-v4",
             env_kwargs={},
-            total_timesteps=int(3e6),
-            mini_batch_size=256,
-            lr=3e-4,
-            policy_lr=3e-4,
-            net_kwargs={"value_sizes": [64, 64], "policy_sizes": [32, 32]},
-            replay_buffer_size=1e6,
+            total_timesteps=int(1e5),
+            reward_scale=1,
             gamma=0.99,
             tau=5e-3,
-            alpha=0.2,
-            grad_clip=None,
+            lr=5e-4,
+            policy_lr=5e-3,
+            alpha_lr=3e-4,
+            alpha=1.0,
+            net_kwargs={"value_sizes": [64, 64], "policy_sizes": [32, 32]},
+            mini_batch_size=128,
+            replay_buffer_size=1e6,
+            multi_step=2,
             updates_per_step=1,
-            reward_scale=1,
-            min_n_experience=int(1e4),
+            min_n_experience=int(1024),
             td_target_update_interval=1,
+            grad_clip=None,
             render=False,
             log_interval=10,
+            entropy_tuning=True,
+            eval_interval=100,
             seed=0,
         )
 
@@ -64,14 +67,14 @@ class SACAgent(AbstractAgent):
         self.net_kwargs = config["net_kwargs"]
         self.gamma = config.get("gamma", 0.99)
         self.tau = config.get("tau", 5e-3)
-        self.alpha = torch.tensor(config.get("alpha", 0.2)).to(device)
         self.td_target_update_interval = int(config.get("td_target_update_interval", 1))
-        self.updates_per_step = config.get("updates_per_step", 0.99)
+        self.updates_per_step = config.get("updates_per_step", 1)
         self.grad_clip = config.get("grad_clip", None)
-        self.begin_learn_td = False
         self.min_n_experience = self.start_steps = int(
             config.get("min_n_experience", int(1e4))
         )
+        self.entropy_tuning = config.get("entropy_tuning", True)
+        self.eval_interval = config.get("eval_interval", 1000)
 
         self.critic = TwinnedQNetwork(
             observation_dim=self.observation_dim,
@@ -100,45 +103,26 @@ class SACAgent(AbstractAgent):
         self.q2_optimizer = Adam(self.critic.Q2.parameters(), lr=self.lr)
         self.policy_optimizer = Adam(self.policy.parameters(), lr=self.policy_lr)
 
+        if self.entropy_tuning:
+            self.alpha_lr = config.get("alpha_lr", 3e-4)
+            # target entropy = -|A|
+            self.target_entropy = -torch.prod(
+                torch.Tensor(self.env.action_space.shape).to(device)
+            ).item()
+            # optimize log(alpha), instead of alpha
+            self.log_alpha = torch.zeros(1, requires_grad=True, device=device)
+            self.alpha = self.log_alpha.exp()
+            self.alpha_optimizer = Adam([self.log_alpha], lr=self.alpha_lr)
+        else:
+            self.alpha = torch.tensor(config.get("alpha", 0.2)).to(device)
+
     def run(self):
-        while True:
-            self.train_episode()
-            if self.steps > self.total_timesteps:
-                break
+        return super().run()
 
     def train_episode(self):
-        episode_reward = 0
-        self.episodes += 1
-        episode_steps = 0
-        done = False
-        state = self.env.reset()
-
-        while not done:
-            if self.render:
-                self.env.render()
-
-            action = self.act(state)
-            next_state, reward, done, _ = self.env.step(action)
-            self.steps += 1
-            episode_steps += 1
-            episode_reward += reward
-
-            self.replay_buffer.add((state, action, reward, next_state, done))
-
-            if self.is_update():
-                for _ in range(self.updates_per_step):
-                    self.learn()
-
-            state = next_state
-
-        if self.episodes % self.log_interval == 0:
-            wandb.log({"episode_reward": episode_reward})
-
-    def is_update(self):
-        return (
-            self.replay_buffer.size() > self.mini_batch_size
-            and self.steps >= self.start_steps
-        )
+        super().train_episode()
+        if self.steps % self.eval_interval == 0:
+            self.evaluate()
 
     def act(self, state):
         if self.start_steps > self.steps:
@@ -167,20 +151,28 @@ class SACAgent(AbstractAgent):
         if self.learn_steps % self.td_target_update_interval == 0:
             soft_update(self.critic_target, self.critic, self.tau)
 
-        batch = self.sample_minibatch()
-        weights = 1
+        batch = self.replay_buffer.sample(self.mini_batch_size)
 
-        q1_loss, q2_loss, errors, mean_q1, mean_q2 = self.calc_critic_loss(
-            batch, weights
-        )
-        policy_loss, entropies = self.calc_policy_loss(batch, weights)
+        q1_loss, q2_loss, mean_q1, mean_q2 = self.calc_critic_loss(batch)
+        policy_loss, entropies = self.calc_policy_loss(batch)
 
         update_params(self.policy_optimizer, self.policy, policy_loss, self.grad_clip)
         update_params(self.q1_optimizer, self.critic.Q1, q1_loss, self.grad_clip)
         update_params(self.q2_optimizer, self.critic.Q2, q2_loss, self.grad_clip)
 
+        if self.entropy_tuning:
+            entropy_loss = self.calc_entropy_loss(entropies)
+            update_params(self.alpha_optimizer, None, entropy_loss)
+            self.alpha = self.log_alpha.exp()
+            wandb.log(
+                {
+                    "loss/alpha": entropy_loss.detach().item(),
+                    "state/alpha": self.alpha.detach().item(),
+                }
+            )
+
         if self.learn_steps % self.log_interval == 0:
-            log_dict = {
+            metrics = {
                 "loss/Q1": q1_loss.detach().item(),
                 "loss/Q2": q2_loss.detach().item(),
                 "loss/policy": policy_loss.detach().item(),
@@ -188,28 +180,26 @@ class SACAgent(AbstractAgent):
                 "state/mean_Q2": mean_q2,
                 "state/entropy": entropies.detach().mean().item(),
             }
-            wandb.log(log_dict)
+            wandb.log(metrics)
 
-    def sample_minibatch(self):
-        batch = self.replay_buffer.sample(self.mini_batch_size, False)
-        return to_batch(*zip(*batch), device)
-
-    def calc_critic_loss(self, batch, weights):
+    def calc_critic_loss(self, batch):
         curr_q1, curr_q2 = self.calc_current_q(*batch)
         target_q = self.calc_target_q(*batch)
 
-        # TD errors for updating priority weights
-        errors = torch.abs(curr_q1.detach() - target_q)
         # We log means of Q to monitor training.
         mean_q1 = curr_q1.detach().mean().item()
         mean_q2 = curr_q2.detach().mean().item()
 
-        # Critic loss is mean squared TD errors with priority weights.
-        q1_loss = torch.mean((curr_q1 - target_q).pow(2) * weights)
-        q2_loss = torch.mean((curr_q2 - target_q).pow(2) * weights)
-        return q1_loss, q2_loss, errors, mean_q1, mean_q2
+        # Critic loss is mean squared TD errors.
+        # q1_loss = torch.mean((curr_q1 - target_q).pow(2))
+        # q2_loss = torch.mean((curr_q2 - target_q).pow(2))
 
-    def calc_policy_loss(self, batch, weights):
+        q1_loss = F.mse_loss(curr_q1, target_q)
+        q2_loss = F.mse_loss(curr_q2, target_q)
+
+        return q1_loss, q2_loss, mean_q1, mean_q2
+
+    def calc_policy_loss(self, batch):
         states, actions, rewards, next_states, dones = batch
 
         # We re-sample actions to calculate expectations of Q.
@@ -218,16 +208,15 @@ class SACAgent(AbstractAgent):
         q1, q2 = self.critic(states, sampled_action)
         q = torch.min(q1, q2)
 
-        # Policy objective is maximization of (Q + alpha * entropy) with
-        # priority weights.
-        policy_loss = torch.mean((-q - self.alpha * entropy) * weights)
+        # Policy objective is maximization of (Q + alpha * entropy).
+        policy_loss = torch.mean((-q - self.alpha * entropy))
         return policy_loss, entropy
 
-    def calc_entropy_loss(self, entropy, weights):
+    def calc_entropy_loss(self, entropy):
         # Intuitively, we increse alpha when entropy is less than target
         # entropy, vice versa.
         entropy_loss = -torch.mean(
-            self.log_alpha * (self.target_entropy - entropy).detach() * weights
+            self.log_alpha * (self.target_entropy - entropy).detach()
         )
         return entropy_loss
 
@@ -236,38 +225,54 @@ class SACAgent(AbstractAgent):
         return curr_q1, curr_q2
 
     def calc_target_q(self, states, actions, rewards, next_states, dones):
+
         with torch.no_grad():
             next_actions, next_entropies, _ = self.policy.sample(next_states)
             next_q1, next_q2 = self.critic_target(next_states, next_actions)
             next_q = torch.min(next_q1, next_q2) + self.alpha * next_entropies
 
-        target_q = rewards + (1.0 - dones) * self.gamma * next_q
+        target_q = self.reward_scale * rewards + (1.0 - dones) * self.gamma * next_q
 
         return target_q
+
+    def evaluate(self):
+        episodes = 10
+        returns = np.zeros((episodes,), dtype=np.float32)
+
+        for i in range(episodes):
+            state = self.env.reset()
+            episode_reward = 0.0
+            done = False
+            while not done:
+                action = self.exploit(state)
+                next_state, reward, done, _ = self.env.step(action)
+                episode_reward += reward
+                state = next_state
+            returns[i] = episode_reward
+
+        mean_return = np.mean(returns)
+
+        wandb.log({"reward/test": mean_return})
 
 
 if __name__ == "__main__":
     # ============== profile ==============#
     # pip install snakeviz
-    # python -m cProfile -o out.profile rl/rl/softqlearning/sql.py -s time
-    # snakeviz sql.profile
+    # python -m cProfile -o out.profile rl/rl/softqlearning/sac.py -s time
+    # snakeviz sac.profile
 
     # ============== sweep ==============#
-    # wandb sweep rl/rl/sweep.yaml
+    # wandb sweep rl/rl/sweep_sac.yaml
 
     env = "InvertedDoublePendulum-v4"  # Pendulum-v1, LunarLander-v2, InvertedDoublePendulum-v4, MountainCarContinuous-v0, Ant-v4
     env_kwargs = {"continuous": True} if env == "LunarLander-v2" else {}
     render = True
-
-    save_path = "~/results/" + env + "/" + str(datetime.datetime.now())
-    save_path = os.path.expanduser(save_path)
 
     default_dict = SACAgent.default_config()
     default_dict.update(
         dict(
             env=env,
             env_kwargs=env_kwargs,
-            save_path=save_path,
             render=render,
         )
     )

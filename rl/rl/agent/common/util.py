@@ -1,33 +1,64 @@
+from re import A
+from typing import Tuple
 import torch
 import numpy as np
 
 
-def get_sa_pairs(s, a):
+def get_sa_pairs(s: torch.tensor, a: torch.tensor) -> Tuple[torch.tensor, torch.tensor]:
     """s is state, a is action particles
+    pair every state with each action particle
+
+    for example, 2 samples of state and 3 action particls
+    s = [s0, s1]
+    a = [a0, a1, a2]
+
+    s_tile = [s0, s1, s0, s1, s0, s1]
+    a_tile = [a0, a1, a2, a0, a1, a2]
+
     Args:
-        s (_type_): (number of states, state dimension)
-        a (_type_): (number of particles, action dimension)
+        s (torch.tensor): (number of samples, state dimension)
+        a (torch.tensor): (number of particles, action dimension)
 
     Returns:
-        _type_: _description_
+        Tuple[torch.tensor, torch.tensor]:
+            s_tile (n_sample*n_particles, state_dim)
+            a_tile (n_sample*n_particles, act_dim)
     """
-    s_tmp = torch.tile(s, (1, a.shape[0])).reshape(-1, s.shape[1])
-    a_tmp = torch.tile(a, (s.shape[0], 1))
-    return torch.cat([s_tmp, a_tmp], -1)
+    n_particles = a.shape[0]
+    n_samples = s.shape[0]
+    state_dim = s.shape[1]
+
+    s_tile = torch.tile(s, (1, n_particles))
+    s_tile = s_tile.reshape(-1, state_dim)
+
+    a_tile = torch.tile(a, (n_samples, 1))
+    return s_tile, a_tile
 
 
-def get_sa_pairs_(s, a):
-    """_summary_
+def get_sa_pairs_(
+    s: torch.tensor, a: torch.tensor
+) -> Tuple[torch.tensor, torch.tensor]:
+    """s is state, a is action particles
+    pair every state with each action particle
+
     Args:
-        s (_type_): (number of states, state dimension)
-        a (_type_): (number of states, number of particles, action dimension)
+        s (tensor): (number of samples, state dimension)
+        a (tensor): (number of samples, number of particles, action dimension)
 
     Returns:
-        _type_: _description_
+        Tuple[torch.tensor, torch.tensor]:
+            s_tile (n_sample*n_particles, state_dim)
+            a_tile (n_sample*n_particles, act_dim)
     """
-    s_tmp = torch.tile(s, (1, a.shape[1])).reshape(-1, s.shape[1])
-    a_tmp = a.reshape(-1, a.shape[2])
-    return torch.cat([s_tmp, a_tmp], -1)
+    n_particles = a.shape[1]
+    act_dim = a.shape[2]
+    state_dim = s.shape[1]
+
+    s_tile = torch.tile(s, (1, n_particles))
+    s_tile = s_tile.reshape(-1, state_dim)
+
+    a_tile = a.reshape(-1, act_dim)
+    return s_tile, a_tile
 
 
 def assert_shape(tensor, expected_shape):
