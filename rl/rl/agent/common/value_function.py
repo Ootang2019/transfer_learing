@@ -75,7 +75,10 @@ class SFNetwork(BaseNetwork):
 
     def forward_chi(self, states, chi):
         target = torch.cat(
-            [self.forward(states, chi[:, i].unsqueeze(1)) for i in range(chi.shape[1])],
+            [
+                self.forward(states, chi[:, i].unsqueeze(1))
+                for i in range(self.feature_dim)
+            ],
             1,
         )
         mask = [i * (self.feature_dim + 1) for i in range(self.feature_dim)]

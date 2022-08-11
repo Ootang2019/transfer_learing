@@ -1,1 +1,2 @@
 from .MyPendulumEnv import MyPendulumEnv
+from .MyInvertedDoublePendulum_v4 import MyInvertedDoublePendulumEnv
