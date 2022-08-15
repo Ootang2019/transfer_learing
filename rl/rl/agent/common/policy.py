@@ -119,7 +119,7 @@ class GaussianPolicy(BaseNetwork):
         return actions, entropies, torch.tanh(means)
 
 
-class GMMPolicy(BaseNetwork):
+class GMMChi(BaseNetwork):
     def __init__(
         self,
         state_dim,
@@ -130,6 +130,7 @@ class GMMPolicy(BaseNetwork):
         reparameterize=True,
         action_strategy="merge",
     ) -> None:
+        super().__init__()
         self.state_dim = state_dim
         self.feature_dim = feature_dim
         self.sizes = sizes
@@ -141,7 +142,7 @@ class GMMPolicy(BaseNetwork):
         self.model = GaussianMixture(
             input_dim=self.state_dim,
             output_dim=self.feature_dim,
-            sizes=sizes,
+            hidden_layers_sizes=sizes,
             K=n_gauss,
             reg=reg,
             reparameterize=reparameterize,
@@ -189,3 +190,6 @@ class GMMPolicy(BaseNetwork):
 
     def squash_correction_mono(self, inp):
         return torch.log(1 - torch.tanh(inp) ** 2 + EPS)
+
+    def reg_loss(self):
+        return self.model.reg_loss_t
