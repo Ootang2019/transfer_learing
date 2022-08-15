@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.optim import Adam
-from agent.common.policy import GMMPolicy
+from agent.common.policy import GMMChi
 from agent.common.value_function import TwinnedSFNetwork
 from agent.common.replay_buffer import MultiStepMemory
 from agent.common.agent import BasicAgent
@@ -42,12 +42,13 @@ class SuccessorAgent(BasicAgent):
             tau=5e-3,
             n_particles=64,
             n_gauss=10,
+            action_strategy="merge",
             grad_clip=None,
             updates_per_step=1,
             td_target_update_interval=1,
             render=False,
             log_interval=10,
-            net_kwargs={"value_sizes": [64, 64], "policy_sizes": [64, 64]},
+            net_kwargs={"value_sizes": [128, 128], "policy_sizes": [64, 64]},
             seed=0,
         )
 
@@ -65,6 +66,7 @@ class SuccessorAgent(BasicAgent):
         self.alpha = torch.tensor(config.get("alpha", 0.2)).to(device)
         self.n_particles = int(config.get("n_particles", 64))
         self.n_gauss = int(config.get("n_gauss", 5))
+        self.action_strategy = config.get("action_strategy", "merge")
         self.td_target_update_interval = int(config.get("td_target_update_interval", 1))
         self.updates_per_step = config.get("updates_per_step", 1)
         self.grad_clip = config.get("grad_clip", None)
@@ -107,11 +109,12 @@ class SuccessorAgent(BasicAgent):
         hard_update(self.sf_target, self.sf)
         grad_false(self.sf_target)
 
-        self.sp = GMMPolicy(
+        self.sp = GMMChi(
             state_dim=self.observation_dim,
             feature_dim=self.feature_dim,
             sizes=self.net_kwargs.get("policy_sizes", [32, 32]),
             n_gauss=self.n_gauss,
+            action_strategy=self.action_strategy,
         ).to(device)
 
         self.sf1_optimizer = Adam(self.sf.SF1.parameters(), lr=self.lr)
@@ -140,13 +143,15 @@ class SuccessorAgent(BasicAgent):
             episode_steps += 1
             episode_reward += reward
 
+            masked_done = done
+
             self.replay_buffer.append(
                 state,
                 feature,
                 action,
                 reward,
                 next_state,
-                masked_done=done,
+                masked_done,
                 episode_done=done,
             )
 
@@ -267,7 +272,7 @@ class SuccessorAgent(BasicAgent):
         sf1, sf2 = self.sf_target.forward_chi(batch_state, chi)
         sf = torch.min(sf1, sf2)
 
-        reg_loss = self.sp.reg_loss_t
+        reg_loss = self.sp.reg_loss()
         loss = torch.mean(logp - 1 / self.alpha * sf) + reg_loss
         return loss
 
@@ -288,7 +293,7 @@ if __name__ == "__main__":
 
     env = "myInvertedDoublePendulum-v4"
     env_kwargs = {}
-    render = False
+    render = True
 
     default_dict = SuccessorAgent.default_config()
     default_dict.update(
