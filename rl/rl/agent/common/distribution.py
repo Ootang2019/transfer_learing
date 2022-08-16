@@ -147,7 +147,7 @@ class GaussianMixture(torch.nn.Module):
         self._mus_t = xz_mus_t
         self._log_sigs_t = xz_log_sigs_t
 
-        return x_t, log_p_x_t
+        return x_t, log_p_x_t, xz_mu_t
 
     @property
     def log_p_x_mono_t(self):

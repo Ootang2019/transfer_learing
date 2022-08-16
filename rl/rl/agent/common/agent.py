@@ -140,16 +140,6 @@ class BasicAgent(AbstractAgent):
             and self.steps >= self.start_steps
         )
 
-    @classmethod
-    def np2ts(cls, obj):
-        if isinstance(obj, np.ndarray):
-            obj = torch.tensor(obj, dtype=torch.float32).to(device)
-        return obj
-
-    @classmethod
-    def ts2np(cls, obj):
-        return obj.cpu().detach().numpy()
-
 
 class MultiTaskAgent(BasicAgent):
     def __init__(

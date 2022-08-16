@@ -149,10 +149,11 @@ class GMMPolicy(BaseNetwork):
     def forward(self, obs):
         obs, n_sample = check_dim(obs)
 
-        act, logp = self.model(obs)
+        act, logp, mean = self.model(obs)
         act = torch.tanh(act)
+        mean = torch.tanh(mean)
         logp -= self.squash_correction(act)
-        return act, logp
+        return act, logp, mean
 
     def squash_correction(self, inp):
         return torch.sum(torch.log(1 - torch.tanh(inp) ** 2 + EPS), 1)

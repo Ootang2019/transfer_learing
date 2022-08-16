@@ -14,6 +14,8 @@ from agent.common.util import (
     hard_update,
     soft_update,
     update_params,
+    np2ts,
+    ts2np,
 )
 from agent.common.value_function import TwinnedSFNetwork
 
@@ -36,21 +38,20 @@ class GPIAgent(MultiTaskAgent):
             env_kwargs={},
             total_timesteps=int(1e5),
             reward_scale=1,
-            gamma=0.99,
             tau=5e-3,
+            alpha=0.2,
             lr=5e-4,
             policy_lr=5e-3,
             alpha_lr=3e-4,
-            alpha=1.0,
-            net_kwargs={"value_sizes": [64, 64], "policy_sizes": [32, 32]},
+            gamma=0.99,
             policy_class="GMM",
             policy_regularization=1e-3,
-            n_gauss=5,
-            mini_batch_size=256,
-            replay_buffer_size=1e6,
+            n_gauss=10,
             multi_step=1,
             updates_per_step=1,
-            min_n_experience=int(1024),
+            mini_batch_size=256,
+            min_n_experience=int(2048),
+            replay_buffer_size=1e6,
             td_target_update_interval=1,
             generate_task_schedule=False,
             task_schedule_stepsize=0.5,
@@ -61,6 +62,7 @@ class GPIAgent(MultiTaskAgent):
             entropy_tuning=True,
             eval_interval=100,
             seed=0,
+            net_kwargs={"value_sizes": [64, 64], "policy_sizes": [32, 32]},
         )
 
     def __init__(
@@ -104,19 +106,18 @@ class GPIAgent(MultiTaskAgent):
         self.update_task(self.w)
         self.ten_episode_pol_loss = []
 
-        # if self.entropy_tuning:
-        #     self.alpha_lr = config.get("alpha_lr", 3e-4)
-        #     # target entropy = -|A|
-        #     self.target_entropy = -torch.prod(
-        #         torch.Tensor(self.env.action_space.shape).to(device)
-        #     ).item()
-        #     # optimize log(alpha), instead of alpha
-        #     self.log_alpha = torch.zeros(1, requires_grad=True, device=device)
-        #     self.alpha = self.log_alpha.exp()
-        #     self.alpha_optimizer = Adam([self.log_alpha], lr=self.alpha_lr)
-        # else:
-        #     self.alpha = torch.tensor(config.get("alpha", 0.2)).to(device)
-        self.alpha = torch.tensor(config.get("alpha", 0.2)).to(device)
+        if self.entropy_tuning:
+            self.alpha_lr = config.get("alpha_lr", 3e-4)
+            # target entropy = -|A|
+            self.target_entropy = -torch.prod(
+                torch.Tensor(self.env.action_space.shape).to(device)
+            ).item()
+            # optimize log(alpha), instead of alpha
+            self.log_alpha = torch.zeros(1, requires_grad=True, device=device)
+            self.alpha = self.log_alpha.exp()
+            self.alpha_optimizer = Adam([self.log_alpha], lr=self.alpha_lr)
+        else:
+            self.alpha = torch.tensor(config.get("alpha", 0.2)).to(device)
 
     def run(self):
         return super().run()
@@ -124,29 +125,36 @@ class GPIAgent(MultiTaskAgent):
     def train_episode(self):
         if self.task_schedule:
             self.change_task()
-        return super().train_episode()
+
+        super().train_episode()
+
+        if self.steps % self.eval_interval == 0:
+            self.evaluate()
 
     def act(self, obs):
         return super().act(obs)
 
-    def get_action(self, obs):
+    def get_action(self, obs, mode="explore"):
         w = self.w
 
-        obs_ts = self.np2ts(obs)
-        w_ts = self.np2ts(w)
+        obs_ts = np2ts(obs)
+        w_ts = np2ts(w)
 
-        act_ts = self.calc_actions(obs_ts, w_ts)
+        act_ts = self.calc_actions(obs_ts, w_ts, mode)
         act_ts = act_ts.squeeze(1)
 
-        act = self.ts2np(act_ts)
+        act = ts2np(act_ts)
         assert act.shape == (self.action_dim,)
         return act
 
-    def calc_actions(self, obs, w):
+    def calc_actions(self, obs, w, mode):
         acts = []
         qs = []
         for idx in range(len(self.sfs)):
-            act, _ = self.pols[idx](obs)
+            if mode == "explore":
+                act = self.explore_act(self.pols[idx], obs)
+            elif mode == "exploit":
+                act = self.exploit_act(self.pols[idx], obs)
             sf0, sf1 = self.sfs[idx](obs, act)
             sf = torch.min(sf0, sf1)
             q = torch.sum(w * sf, 1)
@@ -159,6 +167,14 @@ class GPIAgent(MultiTaskAgent):
         act = acts[pol_idx]
 
         return act
+
+    def explore_act(self, pol, obs):
+        act, _, _ = pol(obs)
+        return act
+
+    def exploit_act(self, pol, obs):
+        _, _, mean = pol(obs)
+        return mean
 
     def learn(self):
         self.learn_steps += 1
@@ -174,47 +190,66 @@ class GPIAgent(MultiTaskAgent):
         pol_optim, pol = self.pol_optims[i], self.pols[i]
 
         sf_loss, mean_sf = self.calc_sf_loss(batch, sf, sf_tar, pol)
-        pol_loss = self.calc_pol_loss(batch, sf_tar, pol)
+        pol_loss, logp = self.calc_pol_loss(batch, sf_tar, pol)
 
         update_params(sf_optim[0], sf.SF0, sf_loss[0], self.grad_clip)
         update_params(sf_optim[1], sf.SF1, sf_loss[1], self.grad_clip)
         update_params(pol_optim, pol, pol_loss, self.grad_clip)
 
-        self.ten_episode_pol_loss.append(pol_loss)
+        if self.entropy_tuning:
+            entropy_loss = self.calc_entropy_loss(-logp)
+            update_params(self.alpha_optimizer, None, entropy_loss)
+            self.alpha = self.log_alpha.exp()
+            wandb.log(
+                {
+                    "loss/alpha": entropy_loss.detach().item(),
+                    "state/alpha": self.alpha.detach().item(),
+                }
+            )
+
+        self.ten_episode_pol_loss.append(ts2np(pol_loss))
         if len(self.ten_episode_pol_loss) > 10:
             self.ten_episode_pol_loss.pop(0)
 
         if self.learn_steps % self.log_interval == 0:
+            w = ts2np(self.w)
             metrics = {
-                f"loss/SF": sf_loss[0].detach().item(),
-                f"loss/policy": pol_loss.detach().item(),
-                f"state/mean_SF": mean_sf[0],
+                "loss/SF0": sf_loss[0].detach().item(),
+                "loss/SF1": sf_loss[1].detach().item(),
+                "loss/policy": pol_loss.detach().item(),
+                "state/mean_SF0": mean_sf[0],
+                "state/mean_SF1": mean_sf[1],
+                "state/logp": logp.detach().mean().item(),
+                "hyperparam/pol_loss_var": np.array(self.ten_episode_pol_loss).var(),
             }
+            for i in range(w.shape[0]):
+                metrics[f"task/{i}"] = w[i]
+
             wandb.log(metrics)
 
     def calc_sf_loss(self, batch, sf, sf_target, pol):
-        (states, features, actions, rewards, next_states, dones) = batch
+        (observations, features, actions, rewards, next_observations, dones) = batch
 
-        cur_sf0, cur_sf1 = sf(states, actions)
+        cur_sf0, cur_sf1 = sf(observations, actions)
         cur_sf0, cur_sf1 = cur_sf0.squeeze(), cur_sf1.squeeze()
 
         target_sf, next_sfv = self.calc_target_sf(
-            next_states, features, dones, sf_target, pol
+            next_observations, features, dones, sf_target, pol
         )
-
-        sf0_loss = F.mse_loss(cur_sf0, target_sf)
-        sf1_loss = F.mse_loss(cur_sf1, target_sf)
 
         mean_sf0 = cur_sf0.detach().mean().item()
         mean_sf1 = cur_sf1.detach().mean().item()
 
+        sf0_loss = F.mse_loss(cur_sf0, target_sf)
+        sf1_loss = F.mse_loss(cur_sf1, target_sf)
+
         return (sf0_loss, sf1_loss), (mean_sf0, mean_sf1)
 
-    def calc_target_sf(self, next_states, features, dones, sf_target, pol):
+    def calc_target_sf(self, next_observations, features, dones, sf_target, pol):
         with torch.no_grad():
-            n_sample = next_states.shape[0]
-            next_actions, _ = pol(next_states)
-            next_sf0, next_sf1 = sf_target(next_states, next_actions)
+            n_sample = next_observations.shape[0]
+            next_actions, _, _ = pol(next_observations)
+            next_sf0, next_sf1 = sf_target(next_observations, next_actions)
             next_sf0 = next_sf0.view(n_sample, -1, self.feature_dim)
             next_sf1 = next_sf1.view(n_sample, -1, self.feature_dim)
 
@@ -227,19 +262,18 @@ class GPIAgent(MultiTaskAgent):
             target_sf = (features + (1 - dones) * self.gamma * next_sfv).squeeze(1)
         return target_sf, next_sfv
 
-    def calc_pol_loss(self, batch, sf_target, pol):
-        (states, _, _, _, _, _) = batch
-        act, logp = pol(states)
+    def calc_pol_loss(self, batch, sf_tar, pol):
+        (observations, _, _, _, _, _) = batch
+        act, logp, _ = pol(observations)
 
-        sf0, sf1 = sf_target(states, act)
-        sf = torch.min(sf0, sf1)
-        q_hat = torch.sum(self.w * sf, 1)
-        q_hat = q_hat.detach()
+        sf0, sf1 = sf_tar(observations, act)
+        q_hat0 = torch.sum(self.w * sf0, 1)
+        q_hat1 = torch.sum(self.w * sf1, 1)
+        q_hat = torch.min(q_hat0, q_hat1)
 
         reg_loss = self.reg_loss(pol)
-
         loss = torch.mean(logp - 1 / self.alpha * q_hat) + reg_loss
-        return loss
+        return loss, logp
 
     def reg_loss(self, pol):
         reg = getattr(pol, "reg_loss", None)
@@ -248,6 +282,14 @@ class GPIAgent(MultiTaskAgent):
         else:
             loss = 0
         return loss
+
+    def calc_entropy_loss(self, entropy):
+        # Intuitively, we increse alpha when entropy is less than target
+        # entropy, vice versa.
+        entropy_loss = -torch.mean(
+            self.log_alpha * (self.target_entropy - entropy).detach()
+        )
+        return entropy_loss
 
     def generate_schedule(self, gap):
         l = []
@@ -356,6 +398,26 @@ class GPIAgent(MultiTaskAgent):
         self.pols.append(policy)
         self.pol_optims.append(policy_optimizer)
         self.cur_idx += 1
+
+    def evaluate(self):
+        episodes = 10
+        mode = "exploit"
+        returns = np.zeros((episodes,), dtype=np.float32)
+
+        for i in range(episodes):
+            observation = self.env.reset()
+            episode_reward = 0.0
+            done = False
+            while not done:
+                action = self.get_action(observation, mode)
+                next_observation, reward, done, _ = self.env.step(action)
+                episode_reward += reward
+                observation = next_observation
+            returns[i] = episode_reward
+
+        mean_return = np.mean(returns)
+
+        wandb.log({"reward/test": mean_return})
 
 
 if __name__ == "__main__":

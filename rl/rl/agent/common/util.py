@@ -3,6 +3,8 @@ from typing import Tuple
 import torch
 import numpy as np
 
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
 
 def get_sa_pairs(s: torch.tensor, a: torch.tensor) -> Tuple[torch.tensor, torch.tensor]:
     """s is state, a is action particles
@@ -88,6 +90,16 @@ def check_dim(obj):
         obj = obj[None, :]
         n_samples = 1
     return obj, n_samples
+
+
+def np2ts(obj):
+    if isinstance(obj, np.ndarray):
+        obj = torch.tensor(obj, dtype=torch.float32).to(device)
+    return obj
+
+
+def ts2np(obj):
+    return obj.cpu().detach().numpy()
 
 
 def to_batch(
