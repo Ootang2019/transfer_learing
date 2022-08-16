@@ -114,7 +114,7 @@ class Memory:
 
 
 class MultiStepBuff:
-    keys = ["state", "action", "reward"]
+    keys = ["state", "feature", "action", "reward"]
 
     def __init__(self, maxlen=3):
         super(MultiStepBuff, self).__init__()
@@ -152,7 +152,7 @@ class MultiStepBuff:
         return len(self.memory["state"])
 
 
-class MultiStepMemory(Memory):
+class MyMultiStepMemory(Memory):
     def __init__(
         self,
         capacity,
@@ -163,9 +163,7 @@ class MultiStepMemory(Memory):
         gamma=0.99,
         multi_step=3,
     ):
-        super(MultiStepMemory, self).__init__(
-            capacity, state_shape, feature_shape, action_shape, device
-        )
+        super().__init__(capacity, state_shape, feature_shape, action_shape, device)
 
         self.gamma = gamma
         self.multi_step = int(multi_step)

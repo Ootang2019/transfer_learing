@@ -1,22 +1,21 @@
-from stat import SF_IMMUTABLE
 import numpy as np
 import torch
 import torch.nn.functional as F
+import wandb
 from torch.optim import Adam
+
+from agent.common.agent import MultiTaskAgent
 from agent.common.policy import GMMChi
-from agent.common.value_function import TwinnedSFNetwork
-from agent.common.replay_buffer import MultiStepMemory
-from agent.common.agent import BasicAgent
 from agent.common.util import (
     assert_shape,
     get_sa_pairs,
     get_sa_pairs_,
+    grad_false,
     hard_update,
     soft_update,
-    grad_false,
     update_params,
 )
-import wandb
+from agent.common.value_function import TwinnedSFNetwork
 
 EPS = 1e-2
 
@@ -24,7 +23,7 @@ torch.autograd.set_detect_anomaly(True)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
-class SuccessorAgent(BasicAgent):
+class SuccessorAgent(MultiTaskAgent):
     @classmethod
     def default_config(cls):
         return dict(
@@ -72,24 +71,6 @@ class SuccessorAgent(BasicAgent):
         self.grad_clip = config.get("grad_clip", None)
         self.net_kwargs = config["net_kwargs"]
 
-        self.learn_steps = 0
-        self.episodes = 0
-
-        self.observation_dim = self.env.observation_space.shape[0]
-        self.action_dim = self.env.action_space.shape[0]
-        self.feature_dim = self.env.feature_space.shape[0]
-        self.w = np.array(self.env.w)
-
-        self.replay_buffer = MultiStepMemory(
-            int(self.replay_buffer_size),
-            self.env.observation_space.shape,
-            self.env.feature_space.shape,
-            self.env.action_space.shape,
-            device,
-            self.gamma,
-            self.multi_step,
-        )
-
         self.sf = TwinnedSFNetwork(
             observation_dim=self.observation_dim,
             feature_dim=self.feature_dim,
@@ -117,70 +98,27 @@ class SuccessorAgent(BasicAgent):
             action_strategy=self.action_strategy,
         ).to(device)
 
+        self.sf0_optimizer = Adam(self.sf.SF0.parameters(), lr=self.lr)
         self.sf1_optimizer = Adam(self.sf.SF1.parameters(), lr=self.lr)
-        self.sf2_optimizer = Adam(self.sf.SF2.parameters(), lr=self.lr)
         self.sp_optimizer = Adam(self.sp.parameters(), lr=self.sp_lr)
 
     def run(self):
         return super().run()
 
     def train_episode(self):
-        episode_reward = 0
-        self.episodes += 1
-        episode_steps = 0
-        done = False
-        state, _ = self.env.reset(return_info=True)
-        feature = np.zeros(5)
-
-        while not done:
-            if self.render:
-                self.env.render()
-
-            action = self.act(state)
-            next_state, reward, done, info = self.env.step(action)
-            next_feature = info["features"]
-            self.steps += 1
-            episode_steps += 1
-            episode_reward += reward
-
-            masked_done = done
-
-            self.replay_buffer.append(
-                state,
-                feature,
-                action,
-                reward,
-                next_state,
-                masked_done,
-                episode_done=done,
-            )
-
-            if self.is_update():
-                for _ in range(self.updates_per_step):
-                    self.learn()
-
-            state = next_state
-            feature = next_feature
-
-        if self.episodes % self.log_interval == 0:
-            wandb.log({"reward/train": episode_reward})
+        return super().train_episode()
 
     def act(self, obs):
-        if self.start_steps > self.steps:
-            action = self.env.action_space.sample()
-        else:
-            action = self.get_action(obs)
-        return action
+        return super().act(obs)
 
     def get_action(self, obs):
         w = self.w
-        if isinstance(obs, np.ndarray):
-            obs = torch.tensor(obs, dtype=torch.float32).to(device)
-        if isinstance(w, np.ndarray):
-            w = torch.tensor(w, dtype=torch.float32).to(device)
+        obs_ts = self.np2ts(obs)
+        w_ts = self.np2ts(w)
 
-        act, _ = self.sp.act(obs, w)
-        act = act.cpu().detach().numpy()
+        act, _ = self.sp.act(obs_ts, w_ts)
+
+        act = self.ts2np(act)
         assert act.shape == (self.action_dim,)
         return act
 
@@ -192,20 +130,20 @@ class SuccessorAgent(BasicAgent):
 
         batch = self.replay_buffer.sample(self.mini_batch_size)
 
-        sf1_loss, sf2_loss, mean_sf1, mean_sf2 = self.calc_sf_loss(batch)
+        sf0_loss, sf1_loss, mean_sf0, mean_sf1 = self.calc_sf_loss(batch)
         policy_loss = self.calc_policy_loss(batch)
 
+        update_params(self.sf0_optimizer, self.sf.SF0, sf0_loss, self.grad_clip)
         update_params(self.sf1_optimizer, self.sf.SF1, sf1_loss, self.grad_clip)
-        update_params(self.sf2_optimizer, self.sf.SF2, sf2_loss, self.grad_clip)
         update_params(self.sp_optimizer, self.sp, policy_loss, self.grad_clip)
 
         if self.learn_steps % self.log_interval == 0:
             metrics = {
+                "loss/SF0": sf0_loss.detach().item(),
                 "loss/SF1": sf1_loss.detach().item(),
-                "loss/SF2": sf2_loss.detach().item(),
                 "loss/policy": policy_loss.detach().item(),
+                "state/mean_SF0": mean_sf0,
                 "state/mean_SF1": mean_sf1,
-                "state/mean_SF2": mean_sf2,
             }
             wandb.log(metrics)
 
@@ -221,19 +159,19 @@ class SuccessorAgent(BasicAgent):
 
         batch_reward *= self.reward_scale
 
-        cur_sf1, cur_sf2 = self.sf(batch_state, batch_action)
-        cur_sf1, cur_sf2 = cur_sf1.squeeze(), cur_sf2.squeeze()
+        cur_sf0, cur_sf1 = self.sf(batch_state, batch_action)
+        cur_sf0, cur_sf1 = cur_sf0.squeeze(), cur_sf1.squeeze()
 
         next_sf = self.calc_next_sf(batch_next_state)
         target_sf, next_sfv = self.calc_target_sf(next_sf, batch_feature, batch_done)
 
+        mean_sf0 = cur_sf0.detach().mean().item()
         mean_sf1 = cur_sf1.detach().mean().item()
-        mean_sf2 = cur_sf2.detach().mean().item()
 
+        sf0_loss = F.mse_loss(cur_sf0, target_sf)
         sf1_loss = F.mse_loss(cur_sf1, target_sf)
-        sf2_loss = F.mse_loss(cur_sf2, target_sf)
 
-        return sf1_loss, sf2_loss, mean_sf1, mean_sf2
+        return sf0_loss, sf1_loss, mean_sf0, mean_sf1
 
     def calc_next_sf(self, batch_next_state):
         sample_action = (
@@ -243,12 +181,12 @@ class SuccessorAgent(BasicAgent):
         )
 
         s, a = get_sa_pairs(batch_next_state, sample_action)
-        next_sf1, next_sf2 = self.sf_target(s, a)
+        next_sf0, next_sf1 = self.sf_target(s, a)
 
         n_sample = batch_next_state.shape[0]
+        next_sf0 = next_sf0.view(n_sample, -1, self.feature_dim)
         next_sf1 = next_sf1.view(n_sample, -1, self.feature_dim)
-        next_sf2 = next_sf2.view(n_sample, -1, self.feature_dim)
-        next_sf = torch.min(next_sf1, next_sf2)
+        next_sf = torch.min(next_sf0, next_sf1)
         next_sf /= self.alpha
         return next_sf
 
@@ -269,8 +207,8 @@ class SuccessorAgent(BasicAgent):
         (batch_state, _, _, _, _, _) = batch
         chi, logp = self.sp.get_chi(batch_state)
 
-        sf1, sf2 = self.sf_target.forward_chi(batch_state, chi)
-        sf = torch.min(sf1, sf2)
+        sf0, sf1 = self.sf_target.forward_chi(batch_state, chi)
+        sf = torch.min(sf0, sf1)
 
         reg_loss = self.sp.reg_loss()
         loss = torch.mean(logp - 1 / self.alpha * sf) + reg_loss
@@ -288,8 +226,8 @@ if __name__ == "__main__":
 
     # ============== sweep ==============#
     # wandb sweep rl/rl/sweep_sa.yaml
-    import gym
     import benchmark_env
+    import gym
 
     env = "myInvertedDoublePendulum-v4"
     env_kwargs = {}

@@ -1,6 +1,7 @@
 from numpy import argmax
 import torch
 import torch.nn as nn
+from .util import check_dim
 
 
 class BaseNetwork(nn.Module):
@@ -39,8 +40,8 @@ class TwinnedQNetwork(BaseNetwork):
         self.Q1 = QNetwork(observation_dim, action_dim, sizes, activation)
         self.Q2 = QNetwork(observation_dim, action_dim, sizes, activation)
 
-    def forward(self, states, actions):
-        x = torch.cat([states, actions], dim=1)
+    def forward(self, observations, actions):
+        x = torch.cat([observations, actions], dim=1)
         q1 = self.Q1(x)
         q2 = self.Q2(x)
         return q1, q2
@@ -66,17 +67,20 @@ class SFNetwork(BaseNetwork):
         self.fc3 = nn.Linear(self.sizes[1], self.feature_dim)
         self.activation = activation()
 
-    def forward(self, states, actions):
-        x = torch.cat([states, actions], dim=1)
+    def forward(self, observations, actions):
+        observations, _ = check_dim(observations)
+        actions, _ = check_dim(actions)
+
+        x = torch.cat([observations, actions], dim=1)
         x = self.activation(self.fc1(x))
         x = self.activation(self.fc2(x))
         x = self.fc3(x)
         return x
 
-    def forward_chi(self, states, chi):
+    def forward_chi(self, observations, chi):
         target = torch.cat(
             [
-                self.forward(states, chi[:, i].unsqueeze(1))
+                self.forward(observations, chi[:, i].unsqueeze(1))
                 for i in range(self.feature_dim)
             ],
             1,
@@ -96,19 +100,19 @@ class TwinnedSFNetwork(BaseNetwork):
     ):
         super().__init__()
 
+        self.SF0 = SFNetwork(
+            observation_dim, feature_dim, action_dim, sizes, activation
+        )
         self.SF1 = SFNetwork(
             observation_dim, feature_dim, action_dim, sizes, activation
         )
-        self.SF2 = SFNetwork(
-            observation_dim, feature_dim, action_dim, sizes, activation
-        )
 
-    def forward(self, states, actions):
-        sf1 = self.SF1(states, actions)
-        sf2 = self.SF2(states, actions)
-        return sf1, sf2
+    def forward(self, observations, actions):
+        sf0 = self.SF0(observations, actions)
+        sf1 = self.SF1(observations, actions)
+        return sf0, sf1
 
-    def forward_chi(self, states, chi):
-        target1 = self.SF1.forward_chi(states, chi)
-        target2 = self.SF2.forward_chi(states, chi)
+    def forward_chi(self, observations, chi):
+        target1 = self.SF0.forward_chi(observations, chi)
+        target2 = self.SF1.forward_chi(observations, chi)
         return target1, target2

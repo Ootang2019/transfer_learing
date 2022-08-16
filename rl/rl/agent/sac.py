@@ -191,9 +191,6 @@ class SACAgent(BasicAgent):
         mean_q2 = curr_q2.detach().mean().item()
 
         # Critic loss is mean squared TD errors.
-        # q1_loss = torch.mean((curr_q1 - target_q).pow(2))
-        # q2_loss = torch.mean((curr_q2 - target_q).pow(2))
-
         q1_loss = F.mse_loss(curr_q1, target_q)
         q2_loss = F.mse_loss(curr_q2, target_q)
 

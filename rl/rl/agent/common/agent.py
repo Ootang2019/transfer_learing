@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import wandb
 from rltorch.memory import MultiStepMemory
+from agent.common.replay_buffer import MyMultiStepMemory
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -138,3 +139,127 @@ class BasicAgent(AbstractAgent):
             len(self.replay_buffer) > self.mini_batch_size
             and self.steps >= self.start_steps
         )
+
+    @classmethod
+    def np2ts(cls, obj):
+        if isinstance(obj, np.ndarray):
+            obj = torch.tensor(obj, dtype=torch.float32).to(device)
+        return obj
+
+    @classmethod
+    def ts2np(cls, obj):
+        return obj.cpu().detach().numpy()
+
+
+class MultiTaskAgent(BasicAgent):
+    def __init__(
+        self,
+        env: str,
+        env_kwargs: dict = {},
+        total_timesteps=1000000,
+        reward_scale: float = 1,
+        replay_buffer_size: int = 1000000,
+        gamma: float = 0.99,
+        multi_step: int = 1,
+        mini_batch_size: int = 128,
+        min_n_experience: int = 1024,
+        updates_per_step: int = 1,
+        render: bool = False,
+        log_interval=10,
+        seed=0,
+        **kwargs,
+    ):
+        super().__init__(
+            env,
+            env_kwargs,
+            total_timesteps,
+            reward_scale,
+            replay_buffer_size,
+            gamma,
+            multi_step,
+            mini_batch_size,
+            min_n_experience,
+            updates_per_step,
+            render,
+            log_interval,
+            seed,
+            **kwargs,
+        )
+        self.learn_steps = 0
+        self.episodes = 0
+
+        if self.env.max_episode_steps is not None:
+            self.max_episode_steps = self.env.max_episode_steps
+        elif self.env._max_episode_steps is not None:
+            self.max_episode_steps = self.env._max_episode_steps
+        else:
+            self.max_episode_steps = int(1e10)
+
+        self.observation_dim = self.env.observation_space.shape[0]
+        self.action_dim = self.env.action_space.shape[0]
+        self.feature_dim = self.env.feature_space.shape[0]
+        self.w = np.array(self.env.w)
+
+        self.replay_buffer = MyMultiStepMemory(
+            int(self.replay_buffer_size),
+            self.env.observation_space.shape,
+            self.env.feature_space.shape,
+            self.env.action_space.shape,
+            device,
+            self.gamma,
+            self.multi_step,
+        )
+
+    def train_episode(self):
+        episode_reward = 0
+        self.episodes += 1
+        episode_steps = 0
+        done = False
+        state, _ = self.env.reset(return_info=True)
+        feature = np.zeros(self.feature_dim)
+
+        while not done:
+            if self.render:
+                self.env.render()
+
+            action = self.act(state)
+            next_state, reward, done, info = self.env.step(action)
+            next_feature = info["features"]
+            self.steps += 1
+            episode_steps += 1
+            episode_reward += reward
+
+            if episode_steps >= self.max_episode_steps:
+                masked_done = False
+            else:
+                masked_done = done
+
+            self.replay_buffer.append(
+                state,
+                feature,
+                action,
+                reward,
+                next_state,
+                masked_done,
+                episode_done=done,
+            )
+
+            if self.is_update():
+                for _ in range(self.updates_per_step):
+                    self.learn()
+
+            state = next_state
+            feature = next_feature
+
+        if self.episodes % self.log_interval == 0:
+            wandb.log({"reward/train": episode_reward})
+
+    def act(self, obs):
+        if self.start_steps > self.steps:
+            action = self.env.action_space.sample()
+        else:
+            action = self.get_action(obs)
+        return action
+
+    def get_action(self, obs):
+        raise NotImplementedError

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .util import get_sa_pairs
+from .util import get_sa_pairs, check_dim
 from .distribution import GaussianMixture
 import numpy as np
 from torch.distributions import Normal
@@ -93,8 +93,8 @@ class GaussianPolicy(BaseNetwork):
         self.relu = nn.ReLU()
         self.tanh = nn.Tanh()
 
-    def forward(self, states):
-        x = self.relu(self.fc1(states))
+    def forward(self, obs):
+        x = self.relu(self.fc1(obs))
         x = self.relu(self.fc2(x))
         x = self.fc3(x)
         x = self.tanh(x) if self.squash else x
@@ -104,9 +104,9 @@ class GaussianPolicy(BaseNetwork):
 
         return mean, log_std
 
-    def sample(self, states):
+    def sample(self, obs):
         # calculate Gaussian distribusion of (mean, std)
-        means, log_stds = self.forward(states)
+        means, log_stds = self.forward(obs)
         stds = log_stds.exp()
         normals = Normal(means, stds)
         # sample actions
@@ -119,10 +119,52 @@ class GaussianPolicy(BaseNetwork):
         return actions, entropies, torch.tanh(means)
 
 
-class GMMChi(BaseNetwork):
+class GMMPolicy(BaseNetwork):
     def __init__(
         self,
-        state_dim,
+        observation_dim,
+        action_dim,
+        sizes=[64, 64],
+        n_gauss=10,
+        reg=0.001,
+        reparameterize=True,
+    ) -> None:
+        super().__init__()
+        self.observation_dim = observation_dim
+        self.action_dim = action_dim
+        self.sizes = sizes
+        self.n_gauss = n_gauss
+        self.reg = reg
+        self.reparameterize = reparameterize
+
+        self.model = GaussianMixture(
+            input_dim=self.observation_dim,
+            output_dim=self.action_dim,
+            hidden_layers_sizes=sizes,
+            K=n_gauss,
+            reg=reg,
+            reparameterize=reparameterize,
+        )
+
+    def forward(self, obs):
+        obs, n_sample = check_dim(obs)
+
+        act, logp = self.model(obs)
+        act = torch.tanh(act)
+        logp -= self.squash_correction(act)
+        return act, logp
+
+    def squash_correction(self, inp):
+        return torch.sum(torch.log(1 - torch.tanh(inp) ** 2 + EPS), 1)
+
+    def reg_loss(self):
+        return self.model.reg_loss_t
+
+
+class GMMChi(GMMPolicy):
+    def __init__(
+        self,
+        observation_dim,
         feature_dim,
         sizes=[64, 64],
         n_gauss=10,
@@ -130,30 +172,20 @@ class GMMChi(BaseNetwork):
         reparameterize=True,
         action_strategy="merge",
     ) -> None:
-        super().__init__()
-        self.state_dim = state_dim
-        self.feature_dim = feature_dim
-        self.sizes = sizes
-        self.n_gauss = n_gauss
-        self.reg = reg
-        self.reparameterize = reparameterize
-        self.action_strategy = action_strategy
-
-        self.model = GaussianMixture(
-            input_dim=self.state_dim,
-            output_dim=self.feature_dim,
-            hidden_layers_sizes=sizes,
-            K=n_gauss,
+        super.__init__(
+            observation_dim=observation_dim,
+            action_dim=feature_dim,
+            sizes=sizes,
+            n_gauss=n_gauss,
             reg=reg,
             reparameterize=reparameterize,
         )
 
+        self.feature_dim = feature_dim
+        self.action_strategy = action_strategy
+
     def act(self, obs, w):
-        if obs.ndim > 1:
-            n_state_samples = obs.shape[0]
-        else:
-            obs = obs[None, :]
-            n_state_samples = 1
+        obs, n_sample = check_dim(obs)
 
         chi, logp = self.get_chi(obs)
         p = torch.exp(logp)
@@ -190,6 +222,3 @@ class GMMChi(BaseNetwork):
 
     def squash_correction_mono(self, inp):
         return torch.log(1 - torch.tanh(inp) ** 2 + EPS)
-
-    def reg_loss(self):
-        return self.model.reg_loss_t

@@ -81,6 +81,15 @@ def grad_false(network):
         param.requires_grad = False
 
 
+def check_dim(obj):
+    if obj.ndim > 1:
+        n_samples = obj.shape[0]
+    else:
+        obj = obj[None, :]
+        n_samples = 1
+    return obj, n_samples
+
+
 def to_batch(
     batch_state, batch_action, batch_reward, batch_next_state, batch_done, device
 ):
