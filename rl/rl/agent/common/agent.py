@@ -4,6 +4,7 @@ import numpy as np
 import wandb
 from rltorch.memory import MultiStepMemory
 from agent.common.replay_buffer import MyMultiStepMemory
+from agent.common.util import np2ts, ts2np
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -99,14 +100,14 @@ class BasicAgent(AbstractAgent):
         self.episodes += 1
         episode_steps = 0
         done = False
-        state = self.env.reset()
+        observation = self.env.reset()
 
         while not done:
             if self.render:
                 self.env.render()
 
-            action = self.act(state)
-            next_state, reward, done, _ = self.env.step(action)
+            action = self.act(observation)
+            next_observation, reward, done, _ = self.env.step(action)
             self.steps += 1
             episode_steps += 1
             episode_reward += reward
@@ -116,19 +117,24 @@ class BasicAgent(AbstractAgent):
             else:
                 masked_done = done
             self.replay_buffer.append(
-                state, action, reward, next_state, masked_done, episode_done=done
+                observation,
+                action,
+                reward,
+                next_observation,
+                masked_done,
+                episode_done=done,
             )
 
             if self.is_update():
                 for _ in range(self.updates_per_step):
                     self.learn()
 
-            state = next_state
+            observation = next_observation
 
         if self.episodes % self.log_interval == 0:
             wandb.log({"reward/train": episode_reward})
 
-    def act(self, state):
+    def act(self, observation):
         raise NotImplementedError
 
     def learn(self):
@@ -156,6 +162,8 @@ class MultiTaskAgent(BasicAgent):
         updates_per_step: int = 1,
         render: bool = False,
         log_interval=10,
+        eval=True,
+        eval_interval=50,
         seed=0,
         **kwargs,
     ):
@@ -177,6 +185,8 @@ class MultiTaskAgent(BasicAgent):
         )
         self.learn_steps = 0
         self.episodes = 0
+
+        self.eval_interval = eval_interval
 
         if self.env.max_episode_steps is not None:
             self.max_episode_steps = self.env.max_episode_steps
@@ -205,15 +215,15 @@ class MultiTaskAgent(BasicAgent):
         self.episodes += 1
         episode_steps = 0
         done = False
-        state, _ = self.env.reset(return_info=True)
+        observation, _ = self.env.reset(return_info=True)
         feature = np.zeros(self.feature_dim)
 
         while not done:
             if self.render:
                 self.env.render()
 
-            action = self.act(state)
-            next_state, reward, done, info = self.env.step(action)
+            action = self.act(observation)
+            next_observation, reward, done, info = self.env.step(action)
             next_feature = info["features"]
             self.steps += 1
             episode_steps += 1
@@ -225,11 +235,11 @@ class MultiTaskAgent(BasicAgent):
                 masked_done = done
 
             self.replay_buffer.append(
-                state,
+                observation,
                 feature,
                 action,
                 reward,
-                next_state,
+                next_observation,
                 masked_done,
                 episode_done=done,
             )
@@ -238,18 +248,56 @@ class MultiTaskAgent(BasicAgent):
                 for _ in range(self.updates_per_step):
                     self.learn()
 
-            state = next_state
+            observation = next_observation
             feature = next_feature
 
         if self.episodes % self.log_interval == 0:
             wandb.log({"reward/train": episode_reward})
 
-    def act(self, obs):
+        if self.steps % self.eval_interval == 0:
+            self.evaluate()
+
+    def evaluate(self):
+        episodes = 10
+        mode = "exploit"
+        returns = np.zeros((episodes,), dtype=np.float32)
+
+        for i in range(episodes):
+            observation = self.env.reset()
+            episode_reward = 0.0
+            done = False
+            while not done:
+                action = self.act(observation, mode)
+                next_observation, reward, done, _ = self.env.step(action)
+                episode_reward += reward
+                observation = next_observation
+            returns[i] = episode_reward
+
+        mean_return = np.mean(returns)
+
+        wandb.log({"reward/test": mean_return})
+
+    def act(self, obs, mode="explore"):
         if self.start_steps > self.steps:
             action = self.env.action_space.sample()
         else:
-            action = self.get_action(obs)
+            action = self.get_action(obs, mode)
         return action
 
-    def get_action(self, obs):
+    def get_action(self, obs, mode):
+        obs_ts, w_ts = np2ts(obs), np2ts(self.w)
+
+        if mode == "explore":
+            act_ts = self.explore(obs_ts, w_ts)
+        elif mode == "exploit":
+            act_ts = self.exploit(obs_ts, w_ts)
+
+        act = ts2np(act_ts)
+        assert act.shape == (self.action_dim,)
+        return act
+
+    def explore(self, obs, w):
+        raise NotImplementedError
+
+    def exploit(self, obs, w):
         raise NotImplementedError

@@ -120,3 +120,18 @@ def update_params(optim, network, loss, grad_clip=None, retain_graph=False):
         for p in network.modules():
             torch.nn.utils.clip_grad_norm_(p.parameters(), grad_clip)
     optim.step()
+
+
+def generate_grid_schedule(gap, feature_dim, feature_scale):
+    l = []
+    for _ in range(feature_dim):
+        x = np.arange(0.0, 1.0 + gap, gap)
+        l.append(x)
+    g = np.meshgrid(*l)
+    rgrid = []
+    for i in range(len(g)):
+        rgrid.append(g[i].reshape(-1, 1))
+    grid = np.concatenate(rgrid, 1)
+    grid = np.delete(grid, 0, 0)
+    grid *= feature_scale
+    return grid
