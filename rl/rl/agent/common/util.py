@@ -92,6 +92,22 @@ def check_dim(obj):
     return obj, n_samples
 
 
+def check_action(action, action_dim):
+    if isinstance(action, torch.Tensor):
+        action = ts2np(action)
+
+    action = action.reshape(
+        -1,
+    )
+
+    assert isinstance(action, np.ndarray)
+    assert action.shape == (
+        action_dim,
+    ), f"action shape {action.shape} should be {(action_dim,)}"
+
+    return action
+
+
 def np2ts(obj):
     if isinstance(obj, np.ndarray):
         obj = torch.tensor(obj, dtype=torch.float32).to(device)

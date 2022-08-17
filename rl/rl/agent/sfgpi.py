@@ -22,7 +22,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 EPS = 1e-6
 
 
-class GPIAgent(MultiTaskAgent):
+class SFGPIAgent(MultiTaskAgent):
     """GPI
     Andre Barreto, Transfer in Deep Reinforcement Learning Using
         Successor Features and Generalised Policy Improvement
@@ -42,17 +42,13 @@ class GPIAgent(MultiTaskAgent):
             alpha_lr=3e-4,
             gamma=0.99,
             policy_regularization=1e-3,
-            n_gauss=4,
+            n_gauss=2,
             multi_step=1,
             updates_per_step=1,
             mini_batch_size=256,
             min_n_experience=int(2048),
             replay_buffer_size=1e6,
             td_target_update_interval=1,
-            generate_task_schedule=True,
-            task_schedule_stepsize=1.0,
-            n_rec_sfloss=20,
-            new_task_threshold_sfloss=7,
             grad_clip=None,
             render=False,
             log_interval=10,
@@ -61,6 +57,11 @@ class GPIAgent(MultiTaskAgent):
             eval_interval=100,
             seed=0,
             net_kwargs={"value_sizes": [64, 64], "policy_sizes": [32, 32]},
+            task_schedule=None,
+            task_manual=None,
+            n_rec_sfloss=40,
+            task_schedule_stepsize=1.0,
+            new_task_threshold_sfloss=30,
         )
 
     def __init__(
@@ -93,20 +94,24 @@ class GPIAgent(MultiTaskAgent):
 
         self.task_idx = 0
         self.prev_ws = []
-        self.feature_scale = self.env.w
 
-        self.task_schedule = config.get("generate_task_schedule", False)
-        self.task_schedule_stepsize = config.get("task_schedule_stepsize", 1.0)
-        if self.task_schedule:
+        self.task_schedule = config.get("task_schedule", "manual")
+        if self.task_schedule == "manual":
+            task_manual = config.get("task_manual")
+            self.w_schedule = task_manual * self.feature_scale
+            self.w = self.w_schedule[self.task_idx]
+        elif self.task_schedule == "grid":
+            self.task_schedule_stepsize = config.get("task_schedule_stepsize", 1.0)
             self.w_schedule = generate_grid_schedule(
                 self.task_schedule_stepsize, self.feature_dim, self.feature_scale
             )
             self.w = self.w_schedule[self.task_idx]
-        self.update_task(self.w)
 
+        self.update_task(self.w)
+        self.learn_all_tasks = False
         self.n_sf_losses = []
-        self.n_rec_sfloss = config.get("n_rec_sfloss", 20)
-        self.task_thresh_sfloss = config.get("new_task_threshold_sfloss", 5)
+        self.n_rec_sfloss = config.get("n_rec_sfloss", 40)
+        self.task_thresh_sfloss = config.get("new_task_threshold_sfloss", 40)
 
         if self.entropy_tuning:
             self.alpha_lr = config.get("alpha_lr", 3e-4)
@@ -122,11 +127,16 @@ class GPIAgent(MultiTaskAgent):
             self.alpha = torch.tensor(config.get("alpha", 0.2)).to(device)
 
     def run(self):
-        return super().run()
+        while True:
+            self.train_episode()
+            if self.learn_all_tasks:
+                break
+            if self.steps > self.total_timesteps:
+                break
 
     def train_episode(self):
-        if self.task_schedule:
-            self.change_task()
+        if self.task_schedule is not None:
+            self.learn_all_tasks = self.change_task()
 
         super().train_episode()
 
@@ -185,7 +195,7 @@ class GPIAgent(MultiTaskAgent):
         update_params(pol_optim, pol, pol_loss, self.grad_clip)
 
         if self.entropy_tuning:
-            entropy_loss = self.calc_entropy_loss(-logp)
+            entropy_loss = self.calc_entropy_loss(logp)
             update_params(self.alpha_optimizer, None, entropy_loss)
             self.alpha = self.log_alpha.exp()
             wandb.log(
@@ -201,11 +211,11 @@ class GPIAgent(MultiTaskAgent):
             metrics = {
                 "loss/SF0": sf_loss[0].detach().item(),
                 "loss/SF1": sf_loss[1].detach().item(),
+                "loss/policy": pol_loss.detach().item(),
+                "loss/sfloss_var": sf_loss_var,
                 "state/mean_SF0": mean_sf[0],
                 "state/mean_SF1": mean_sf[1],
-                "loss/policy": pol_loss.detach().item(),
                 "state/logp": logp.detach().mean().item(),
-                "loss/sfloss_var": sf_loss_var,
                 "task/task_idx": self.task_idx,
                 "task/policy_idx": self.policy_idx,
             }
@@ -257,6 +267,7 @@ class GPIAgent(MultiTaskAgent):
             n_sample = next_observations.shape[0]
             next_actions, _, _ = pol(next_observations)
             next_sf0, next_sf1 = sf_target(next_observations, next_actions)
+
             next_sf0 = next_sf0.view(n_sample, -1, self.feature_dim)
             next_sf1 = next_sf1.view(n_sample, -1, self.feature_dim)
 
@@ -323,9 +334,16 @@ class GPIAgent(MultiTaskAgent):
     def change_task(self):
         """if a current task is mastered then update task according to schedule"""
         if self.master_curtask():
-            self.task_idx += 1
-            w = self.w_schedule[self.task_idx]
-            self.update_task(w)
+
+            if self.task_idx < len(self.w_schedule):
+                self.task_idx += 1
+                w = self.w_schedule[self.task_idx]
+                self.update_task(w)
+            else:
+                print("no more task to learn")
+                return True
+
+        return None
 
     def master_curtask(self):
         master = False
@@ -371,29 +389,67 @@ class GPIAgent(MultiTaskAgent):
 if __name__ == "__main__":
     # ============== profile ==============#
     # pip install snakeviz
-    # python -m cProfile -o out.profile rl/rl/agent/gpi.py -s time
-    # snakeviz gpi.profile
+    # python -m cProfile -o out.profile rl/rl/agent/sfgpi.py -s time
+    # snakeviz sfgpi.profile
 
     # ============== sweep ==============#
-    # wandb sweep rl/rl/sweep_gpi.yaml
+    # wandb sweep rl/rl/sweep_sfgpi.yaml
     import benchmark_env
+    import drone_env
     import gym
+    from drone_env.envs.script import close_simulation
 
-    env = "myInvertedDoublePendulum-v4"
-    env_kwargs = {}
+    env = "multitaskpid-v0"
+    # env = "myInvertedDoublePendulum-v4"
     render = True
+    auto_start_simulation = False
+    if auto_start_simulation:
+        close_simulation()
 
-    default_dict = GPIAgent.default_config()
+    if env == "multitaskpid-v0":
+        env_config = {
+            "DBG": False,
+            "simulation": {
+                "gui": render,
+                "enable_meshes": True,
+                "auto_start_simulation": auto_start_simulation,
+                "position": (0, 0, 0.05),  # initial spawned position
+            },
+            "observation": {
+                "DBG_ROS": False,
+                "DBG_OBS": False,
+                "noise_stdv": 0.0,
+            },
+            "action": {
+                "DBG_ACT": False,
+                "act_noise_stdv": 0.0,
+            },
+            "target": {
+                "DBG_ROS": False,
+            },
+        }
+        env_kwargs = {"config": env_config}
+    else:
+        env = {}
+
+    # task_schedule = "Manual"
+    # task_manual = np.array([np.array([0, 0, 0, 0, 0]), np.array([1, 1, 1, 1, 1])])
+    task_schedule = None
+    task_manual = None
+
+    default_dict = SFGPIAgent.default_config()
     default_dict.update(
         dict(
             env=env,
             env_kwargs=env_kwargs,
             render=render,
+            task_schedule=task_schedule,
+            task_manual=task_manual,
         )
     )
 
     wandb.init(config=default_dict)
     print(wandb.config)
 
-    agent = GPIAgent(wandb.config)
+    agent = SFGPIAgent(wandb.config)
     agent.run()

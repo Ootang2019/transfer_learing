@@ -4,7 +4,7 @@ import numpy as np
 import wandb
 from rltorch.memory import MultiStepMemory
 from agent.common.replay_buffer import MyMultiStepMemory
-from agent.common.util import np2ts, ts2np
+from agent.common.util import np2ts, ts2np, check_action
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -199,6 +199,7 @@ class MultiTaskAgent(BasicAgent):
         self.action_dim = self.env.action_space.shape[0]
         self.feature_dim = self.env.feature_space.shape[0]
         self.w = np.array(self.env.w)
+        self.feature_scale = np.array(self.env.w)
 
         self.replay_buffer = MyMultiStepMemory(
             int(self.replay_buffer_size),
@@ -215,12 +216,12 @@ class MultiTaskAgent(BasicAgent):
         self.episodes += 1
         episode_steps = 0
         done = False
-        observation, _ = self.env.reset(return_info=True)
-        feature = np.zeros(self.feature_dim)
+        observation, info = self.env.reset()
+        feature = info["features"]
 
         while not done:
-            if self.render:
-                self.env.render()
+            # if self.render:
+            # self.env.render()
 
             action = self.act(observation)
             next_observation, reward, done, info = self.env.step(action)
@@ -293,7 +294,8 @@ class MultiTaskAgent(BasicAgent):
             act_ts = self.exploit(obs_ts, w_ts)
 
         act = ts2np(act_ts)
-        assert act.shape == (self.action_dim,)
+
+        act = check_action(act, self.action_dim)
         return act
 
     def explore(self, obs, w):

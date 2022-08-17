@@ -1,14 +1,15 @@
 from __future__ import absolute_import, division, print_function
 
+import copy
 from lib2to3.pytree import Base
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import rospy
-from drone_env.envs.common.action import Action
-from drone_env.envs.common.teacher import PositionPID, AttitudePID
 from drone_env.envs.base_env import BaseEnv
-import copy
+from drone_env.envs.common.action import Action
+from drone_env.envs.common.teacher import AttitudePID, PositionPID
+from gym.spaces import Box
 
 Observation = Union[np.ndarray, float]
 
@@ -66,39 +67,21 @@ class MultiTaskEnv(BaseEnv):
 
     def __init__(self, config: Optional[Dict[Any, Any]] = None) -> None:
         super().__init__(config)
+
+        self.max_episode_steps = self.config["duration"]
         self.tasks = self.config["tasks"]
+
+        self.w = self.get_tasks_weights()
+        self.feature_len = self.w.shape[0]
         self.tracking_feature_len = np.concatenate(
             [v for k, v in self.tasks["tracking"].items()]
         ).shape[0]
-        self.feature_len = (
-            self.tracking_feature_len
-            + self.tasks["success"].shape[0]
-            + self.tasks["action"].shape[0]
+
+        self.feature_space = Box(
+            low=-np.inf, high=np.inf, shape=(len(self.w),), dtype=np.float32
         )
+
         self.obs, self.obs_info = None, None
-
-    def reset(self) -> Observation:
-        self.steps = 0
-        self.done = False
-        self._reset()
-
-        self._sample_new_goal()
-
-        obs, obs_info = self.observation_type.observe()
-        self.obs, self.obs_info = obs, obs_info
-        return obs
-
-    def _sample_new_goal(self):
-        if self.config["target"]["type"] == "MultiGoal" and self.config["target"].get(
-            "enable_random_goal", True
-        ):
-            n_waypoints = np.random.randint(4, 8)
-            self.target_type.sample_new_wplist(n_waypoints=n_waypoints)
-        elif self.config["target"]["type"] == "RandomGoal":
-            pos = self.config["simulation"]["position"]
-            self.target_type.sample_new_goal(origin=np.array([pos[1], pos[0], -pos[2]]))
-        elif self.config["target"]["type"] == "FixedGoal":
-            self.target_type.sample_new_goal()
 
     def one_step(
         self,
@@ -116,13 +99,13 @@ class MultiTaskEnv(BaseEnv):
                 terminal: bool,
                 info: dictionary of all the step info,
         """
+        self.w = self.get_tasks_weights()
         self._simulate(action)
         obs, obs_info = self.observation_type.observe()
         self.obs, self.obs_info = obs, obs_info
-        (reward, reward_info) = self._reward(
-            obs.copy(), action, copy.deepcopy(obs_info)
-        )
+        reward, reward_info = self._reward(obs.copy(), action, copy.deepcopy(obs_info))
         terminal = self._is_terminal(copy.deepcopy(obs_info))
+
         info = {
             "step": self.steps,
             "obs": obs,
@@ -161,9 +144,8 @@ class MultiTaskEnv(BaseEnv):
         Returns:
             Tuple[float, dict]: [reward scalar and a detailed reward info]
         """
-        weights = self.get_tasks_weights()
         features = self.compute_features(obs, obs_info)
-        reward = np.dot(weights, features)
+        reward = np.dot(self.w, features)
         reward = np.clip(reward, -1, 1)
         reward_info = {
             "reward": reward,
@@ -173,13 +155,21 @@ class MultiTaskEnv(BaseEnv):
 
         return float(reward), reward_info
 
+    def reset(self) -> Observation:
+        self.steps = 0
+        self.done = False
+        self._reset()
+
+        self._sample_new_goal()
+
+        obs, obs_info = self.observation_type.observe()
+        self.obs, self.obs_info = obs, obs_info
+        return obs, {"features": self.compute_features(obs, obs_info)}
+
     def get_tasks_weights(self):
         tasks = self.tasks.copy()
         feature_weights = np.concatenate([v for k, v in tasks["tracking"].items()])
         return np.concatenate([feature_weights, tasks["success"], tasks["action"]])
-
-    def get_features(self):
-        return self.compute_features(self.obs, self.obs_info)
 
     def compute_features(self, obs, obs_info):
         tracking_features = -np.abs(obs[0 : self.tracking_feature_len])
@@ -228,10 +218,20 @@ class MultiTaskEnv(BaseEnv):
         success = False
 
         fail = False
-        # if obs_info["obs_dict"]["position"][2] >= -5.0:
-        #     fail = True
 
         return time or success or fail
+
+    def _sample_new_goal(self):
+        if self.config["target"]["type"] == "MultiGoal" and self.config["target"].get(
+            "enable_random_goal", True
+        ):
+            n_waypoints = np.random.randint(4, 8)
+            self.target_type.sample_new_wplist(n_waypoints=n_waypoints)
+        elif self.config["target"]["type"] == "RandomGoal":
+            pos = self.config["simulation"]["position"]
+            self.target_type.sample_new_goal(origin=np.array([pos[1], pos[0], -pos[2]]))
+        elif self.config["target"]["type"] == "FixedGoal":
+            self.target_type.sample_new_goal()
 
 
 class MultiTaskPIDEnv(MultiTaskEnv):
@@ -249,7 +249,7 @@ class MultiTaskPIDEnv(MultiTaskEnv):
         obs, obs_info = self.observation_type.observe()
         base_act = self.base_ctrl.act(obs_info)
         action[0:3] = base_act[0:3]
-        np.clip(action, -1, 1)
+        action = np.clip(action, -1, 1)
 
         return super().one_step(action)
 
@@ -271,9 +271,7 @@ class MultiTaskPIDEnv(MultiTaskEnv):
         success = False
 
         fail = False
-        if obs_info["obs_dict"]["position"][2] >= -5.0:
-            fail = True
-        elif obs_info["obs_dict"]["position"][2] <= -100.0:
+        if obs_info["obs_dict"]["position"][2] <= -100.0:
             fail = True
 
         return time or success or fail
@@ -281,6 +279,7 @@ class MultiTaskPIDEnv(MultiTaskEnv):
 
 if __name__ == "__main__":
     import copy
+
     from drone_env.envs.common.gazebo_connection import GazeboConnection
     from drone_env.envs.script import close_simulation
 

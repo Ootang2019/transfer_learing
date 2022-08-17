@@ -113,11 +113,11 @@ class Memory:
         self.dones[mem_indices] = dones[batch_indices]
 
 
-class MultiStepBuff:
+class MyMultiStepBuff:
     keys = ["state", "feature", "action", "reward"]
 
     def __init__(self, maxlen=3):
-        super(MultiStepBuff, self).__init__()
+        super().__init__()
         self.maxlen = int(maxlen)
         self.memory = {key: deque(maxlen=self.maxlen) for key in self.keys}
 
@@ -130,14 +130,20 @@ class MultiStepBuff:
     def get(self, gamma=0.99):
         assert len(self) == self.maxlen
         reward = self._multi_step_reward(gamma)
+        feature = self._multi_step_feature(gamma)
         state = self.memory["state"].popleft()
-        feature = self.memory["feature"].popleft()
         action = self.memory["action"].popleft()
         _ = self.memory["reward"].popleft()
+        _ = self.memory["feature"].popleft()
         return state, feature, action, reward
 
     def _multi_step_reward(self, gamma):
         return np.sum([r * (gamma**i) for i, r in enumerate(self.memory["reward"])])
+
+    def _multi_step_feature(self, gamma):
+        return np.sum(
+            [f * (gamma**i) for i, f in enumerate(self.memory["feature"])], 0
+        )
 
     def __getitem__(self, key):
         if key not in self.keys:
@@ -168,7 +174,7 @@ class MyMultiStepMemory(Memory):
         self.gamma = gamma
         self.multi_step = int(multi_step)
         if self.multi_step != 1:
-            self.buff = MultiStepBuff(maxlen=self.multi_step)
+            self.buff = MyMultiStepBuff(maxlen=self.multi_step)
 
     def append(
         self, state, feature, action, reward, next_state, done, episode_done=False
