@@ -20,10 +20,10 @@ class PIDController:
 
         self.err_sum, self.prev_err = 0.0, 0.0
 
-    def action(self, err, err_i=0, err_d=0):
+    def action(self, err, err_i=0, err_d=0, windup=1):
         if not self.i_from_sensor:
             self.err_sum += err * self.delta_t
-            self.err_sum = np.clip(self.err_sum, -1, 1)
+            self.err_sum = np.clip(self.err_sum, -windup, windup)
             err_i = self.err_sum
 
         if not self.d_from_sensor:
@@ -35,7 +35,6 @@ class PIDController:
 
     def clear(self):
         self.err_sum, self.prev_err = 0, 0
-        self.windup = 0.0
 
 
 class AttitudePID:
@@ -103,34 +102,33 @@ class PositionPID(AttitudePID):
     CONFIG = {
         "ctrl_config": {
             "row": {
-                "pid_param": np.array([1.0, 0.7, 0.2]),
-                "gain": 0.3,
-                "d_from_sensor": True,
+                "pid_param": np.array([1.0, 0.3, 0.1]),
+                "gain": 1.0,
+                "d_from_sensor": False,
             },
             "pitch": {
-                "pid_param": np.array([1.0, 0.7, 0.2]),
-                "gain": 0.3,
-                "d_from_sensor": True,
+                "pid_param": np.array([1.0, 0.3, 0.1]),
+                "gain": 1.0,
+                "d_from_sensor": False,
             },
             "yaw": {
-                "pid_param": np.array([1.0, 0.5, 0.1]),
-                "gain": 0.2,
-                "d_from_sensor": True,
+                "pid_param": np.array([1.0, 0.1, 0.4]),
+                "gain": 0.1,
+                "d_from_sensor": False,
             },
             "x": {
-                "pid_param": np.array([1.0, 0.0, 0.0]),
-                "gain": 0.0,
+                "pid_param": np.array([1.0, 0.05, 0.7]),
+                "gain": 0.12,
                 "d_from_sensor": False,
             },
             "y": {
-                "pid_param": np.array([1.0, 0.0, 0.0]),
-                "gain": 0.0,
+                "pid_param": np.array([1.0, 0.05, 0.7]),
+                "gain": 0.12,
                 "d_from_sensor": False,
             },
             "z": {
-                "pid_param": np.array([1.0, 0.1, 0.3]),
+                "pid_param": np.array([1.0, 0.05, 0.8]),
                 "gain": 1.0,
-                "offset": 0.46,
                 "d_from_sensor": False,
             },
         },
@@ -153,17 +151,24 @@ class PositionPID(AttitudePID):
         )
 
     def act(self, obs_info: dict):
-        ang_diff, ang_vel, pos_diff = (
+        ang_diff, ang_vel, pos_diff, ang = (
             obs_info["proc_dict"]["ang_diff"],
             obs_info["obs_dict"]["angular_velocity"],
             obs_info["proc_dict"]["pos_diff"],
+            obs_info["obs_dict"]["angle"],
         )
         x_ctrl = self.ctrl_x.action(err=pos_diff[0])
         y_ctrl = self.ctrl_y.action(err=pos_diff[1])
         z_ctrl = self.ctrl_z.action(err=pos_diff[2])
 
-        row_ctrl = self.ctrl_row.action(err=-ang_diff[0], err_d=-ang_vel[0])
-        pitch_ctrl = self.ctrl_pitch.action(err=-ang_diff[1], err_d=-ang_vel[1])
+        yaw = -ang[2]
+        row_cmd = x_ctrl * np.cos(yaw) + y_ctrl * np.sin(yaw)
+        pitch_cmd = -x_ctrl * np.sin(yaw) + y_ctrl * np.cos(yaw)
+
+        row_ctrl = self.ctrl_row.action(err=row_cmd - ang_diff[0], err_d=-ang_vel[0])
+        pitch_ctrl = self.ctrl_pitch.action(
+            err=-pitch_cmd - ang_diff[1], err_d=-ang_vel[1]
+        )
         yaw_ctrl = self.ctrl_yaw.action(err=ang_diff[2], err_d=ang_vel[2])
 
         return np.clip(np.array([row_ctrl, pitch_ctrl, yaw_ctrl, z_ctrl]), -1, 1)

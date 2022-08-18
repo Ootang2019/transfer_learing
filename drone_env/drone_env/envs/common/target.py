@@ -205,7 +205,7 @@ class FixedGoal(RandomGoal):
             x_range=(-0, 0),
             y_range=(-0, 0),
             z_range=(-10, -10),
-            v_range=(-0.0, -0.0),
+            v_range=(-0.0, 1),
             phi_range=(-0, 0),
             the_range=(-0, 0),
             psi_range=(-0, 0),

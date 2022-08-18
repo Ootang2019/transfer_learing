@@ -19,6 +19,10 @@ def lmap(v, x, y) -> float:
     return y[0] + (v - x[0]) * (y[1] - y[0]) / (x[1] - x[0])
 
 
+def extract_nparray_from_dict(dic):
+    return [np.atleast_1d(np.array(v, dtype=float)) for k, v in dic.items()]
+
+
 def obj2array(
     rosobj,
     attr_list=["w", "x", "y", "z"],

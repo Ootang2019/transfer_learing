@@ -238,19 +238,8 @@ class KinematicsObservation(ROSObservation):
         "pos_diff",  # 3
         "vel_diff",  # 3
         "vel_norm_diff",  # 1
-        "ori",  # 4
-        "ang",  # 3
-        "angvel",  # 3
-        "pos",  # 3
-        "vel",  # 3
-        "acc",  # 3
-        "goal_ori",  # 4
-        "goal_ang",  # 3
-        "goal_angvel",  # 3
-        "goal_pos",  # 3
-        "goal_vel",  # 3
     ]
-    OBS_DIM = 52
+    OBS_DIM = 17
     OBS_RANGE = {
         "ori_diff": [-1, 1],
         "ang_diff": [-np.pi, np.pi],
@@ -258,33 +247,79 @@ class KinematicsObservation(ROSObservation):
         "pos_diff": [-50, 50],
         "vel_diff": [-20, 20],
         "vel_norm_diff": [-50, 50],
-        "ori": [-1, 1],
-        "ang": [-np.pi, np.pi],
-        "angvel": [-50, 50],
-        "pos": [-50, 50],
-        "vel": [-20, 20],
-        "acc": [-50, 50],
-        "goal_ori": [-1, 1],
-        "goal_ang": [-np.pi, np.pi],
-        "goal_angvel": [-50, 50],
-        "goal_pos": [-50, 50],
-        "goal_vel": [-20, 20],
+    }
+
+    CONSTRAINT = {
+        "pos_ubnd": np.array([20, 20, -1]),
+        "pos_lbnd": np.array([-20, -20, -40]),
     }
 
     def __init__(
-        self, env: "AbstractEnv", noise_stdv=0.02, scale_obs=True, **kwargs: dict
+        self,
+        env: "AbstractEnv",
+        noise_stdv=0.02,
+        scale_obs=True,
+        include_raw_state=True,
+        bnd_constraint=True,
+        **kwargs: dict,
     ) -> None:
         super().__init__(env, **kwargs)
         self.noise_stdv = noise_stdv
         self.scale_obs = scale_obs
+        self.include_raw_state = include_raw_state
+        self.bnd_constraint = bnd_constraint
 
         self.obs_name = self.OBS.copy()
-        self.obs_dim = self.OBS_DIM
+        self.obs_dim = self.tracking_obs_dim = self.OBS_DIM
         self.range_dict = self.OBS_RANGE.copy()
+
+        if self.include_raw_state:
+            self.raw_obs_dim = 19  # 35
+            self.obs_dim += self.raw_obs_dim
+            self.obs_name.extend(  # [4,3,3,3,3,3]
+                ["ori", "ang", "angvel", "pos", "vel", "acc"]
+            )
+            self.range_dict.update(
+                {
+                    "ori": [-1, 1],
+                    "ang": [-np.pi, np.pi],
+                    "angvel": [-50, 50],
+                    "pos": [-50, 50],
+                    "vel": [-20, 20],
+                    "acc": [-50, 50],
+                }
+            )
+
+            self.goal_dim = 16
+            self.obs_dim += self.goal_dim
+            self.obs_name.extend(  # [4,3,3,3,3]
+                ["goal_ori", "goal_ang", "goal_angvel", "goal_pos", "goal_vel"]
+            )
+            self.range_dict.update(
+                {
+                    "goal_ori": [-1, 1],
+                    "goal_ang": [-np.pi, np.pi],
+                    "goal_angvel": [-50, 50],
+                    "goal_pos": [-50, 50],
+                    "goal_vel": [-20, 20],
+                }
+            )
 
         self.actuator_list = [0, 1, 2, 3]
         self.obs_dim += len(self.actuator_list)
         self.obs_name.append("actuator")
+        self.act_dim = len(self.actuator_list)
+
+        if self.bnd_constraint:
+            self.constraint = self.CONSTRAINT.copy()
+            self.constraint_dim = 6
+            self.obs_dim += self.constraint_dim
+            self.pos_ubnd_data = self.constraint["pos_ubnd"]
+            self.pos_lbnd_data = self.constraint["pos_lbnd"]
+            self.obs_name.append("pos2ubnd")
+            self.obs_name.append("pos2lbnd")
+            self.range_dict["pos2ubnd"] = [-50, 50]
+            self.range_dict["pos2lbnd"] = [-50, 50]
 
     def observe(self) -> np.ndarray:
         obs, obs_dict = self._observe()
@@ -309,24 +344,35 @@ class KinematicsObservation(ROSObservation):
             "angular_velocity": self.ang_vel_data,
         }
 
-        proc_dict = self.process_obs(obs_dict, goal_dict, self.scale_obs)
-
         actuator = self.env.action_type.get_cur_act()[self.actuator_list]
+        if self.bnd_constraint:
+            constr_dict = {
+                "actuator": actuator,
+                "upper_boundary_position": self.pos_ubnd_data,
+                "lower_boundary_position": self.pos_lbnd_data,
+            }
+
+        proc_dict = self.process_obs(obs_dict, goal_dict, constr_dict, self.scale_obs)
         proc_dict.update({"actuator": actuator})
 
         proc_df = pd.DataFrame.from_records([proc_dict])
         processed = np.hstack(proc_df[self.obs_name].values[0])
 
-        obs_info = dict(obs_dict=obs_dict, goal_dict=goal_dict, proc_dict=proc_dict)
+        obs_info = dict(
+            obs_dict=obs_dict,
+            goal_dict=goal_dict,
+            constr_dict=constr_dict,
+            proc_dict=proc_dict,
+        )
 
         if self.dbg_obs:
             print("[ observation ] state", processed)
-            print("[ observation ] obs obs_info", obs_info)
+            print("[ observation ] obs_info", obs_info)
 
         return processed, obs_info
 
     def process_obs(
-        self, obs_dict: dict, goal_dict: dict, scale_obs: bool = True
+        self, obs_dict: dict, goal_dict: dict, constr_dict: dict, scale_obs: bool = True
     ) -> dict:
         (
             obs_ori,
@@ -374,7 +420,19 @@ class KinematicsObservation(ROSObservation):
             "goal_vel": goal_vel,
         }
 
-        if scale_obs:
+        if self.bnd_constraint:
+            ubnd_pos, lbnd_pos = (
+                constr_dict["upper_boundary_position"],
+                constr_dict["lower_boundary_position"],
+            )
+            state_dict.update(
+                {
+                    "pos2ubnd": obs_pos - ubnd_pos,
+                    "pos2lbnd": obs_pos - lbnd_pos,
+                }
+            )
+
+        if scale_obs:  # TODO: separate noise from scale
             state_dict = self.scale_obs_dict(state_dict, self.noise_stdv)
 
         return state_dict

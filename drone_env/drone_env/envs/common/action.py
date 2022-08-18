@@ -146,7 +146,7 @@ class ContinuousAction(ROSActionType):
         robot_id: str = "0",
         DBG_ACT: bool = False,
         name_space: str = "machine_0",
-        max_thrust: float = 0.5,  # [%]
+        thrust_range: list = [-1, 1],  # [100%]
         act_noise_stdv: float = 0.05,
         **kwargs,  # pylint: disable=unused-argument
     ) -> None:
@@ -161,7 +161,7 @@ class ContinuousAction(ROSActionType):
         self.act_dim = 4
         self.act_range = self.ACTUATOR_RANGE
         self.act_noise_stdv = act_noise_stdv
-        self.max_thrust = max_thrust
+        self.thrust_range = thrust_range
 
         self.cur_act = self.init_act = np.zeros(self.act_dim)
 
@@ -182,7 +182,7 @@ class ContinuousAction(ROSActionType):
             [np.array]: formated action with 4 channels [0, 1000]
         """
         action += np.random.normal(0, noise_stdv, action.shape)
-        proc = np.clip(action, 0, self.max_thrust)
+        proc = np.clip(action, *self.thrust_range)
         proc = utils.lmap(proc, [-1, 1], self.act_range)
         proc = proc.reshape(self.act_dim, 1)
         return proc
@@ -218,6 +218,7 @@ class ContinuousAction(ROSActionType):
         """
         motors = self.get_cur_act()
         motors_rew = np.exp(-scale * np.linalg.norm(motors))
+        # motors_rew = -scale * np.linalg.norm(motors)
         return motors_rew
 
     def get_cur_act(self):
@@ -257,7 +258,7 @@ class ContinuousVirtualAction(ContinuousAction):
         """
         actuator = self.mixer(action)
         actuator += np.random.normal(0, noise_stdv, actuator.shape)
-        proc = np.clip(actuator, -1, self.max_thrust)
+        proc = np.clip(actuator, *self.thrust_range)
         proc = utils.lmap(proc, [-1, 1], self.act_range)
         proc = proc.reshape(self.act_dim, 1)
         return proc

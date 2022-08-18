@@ -22,13 +22,15 @@ class QNetwork(BaseNetwork):
         self.sizes = sizes
 
         self.fc1 = nn.Linear(self.observation_dim + self.action_dim, self.sizes[0])
+        self.ln1 = nn.LayerNorm(self.sizes[0])
         self.fc2 = nn.Linear(self.sizes[0], self.sizes[1])
+        self.ln2 = nn.LayerNorm(self.sizes[1])
         self.fc3 = nn.Linear(self.sizes[1], 1)
         self.activation = activation()
 
     def forward(self, x):
-        x = self.activation(self.fc1(x))
-        x = self.activation(self.fc2(x))
+        x = self.activation(self.ln1(self.fc1(x)))
+        x = self.activation(self.ln2(self.fc2(x)))
         x = self.fc3(x)
         return x
 
@@ -63,7 +65,9 @@ class SFNetwork(BaseNetwork):
         self.sizes = sizes
 
         self.fc1 = nn.Linear(self.observation_dim + self.action_dim, self.sizes[0])
+        self.ln1 = nn.LayerNorm(self.sizes[0])
         self.fc2 = nn.Linear(self.sizes[0], self.sizes[1])
+        self.ln2 = nn.LayerNorm(self.sizes[1])
         self.fc3 = nn.Linear(self.sizes[1], self.feature_dim)
         self.activation = activation()
 
@@ -72,8 +76,8 @@ class SFNetwork(BaseNetwork):
         actions, _ = check_dim(actions)
 
         x = torch.cat([observations, actions], dim=1)
-        x = self.activation(self.fc1(x))
-        x = self.activation(self.fc2(x))
+        x = self.activation(self.ln1(self.fc1(x)))
+        x = self.activation(self.ln2(self.fc2(x)))
         x = self.fc3(x)
         return x
 

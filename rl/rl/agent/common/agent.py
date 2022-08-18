@@ -259,12 +259,12 @@ class MultiTaskAgent(BasicAgent):
             self.evaluate()
 
     def evaluate(self):
-        episodes = 10
+        episodes = 3
         mode = "exploit"
         returns = np.zeros((episodes,), dtype=np.float32)
 
         for i in range(episodes):
-            observation = self.env.reset()
+            observation, info = self.env.reset()
             episode_reward = 0.0
             done = False
             while not done:

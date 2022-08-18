@@ -37,14 +37,14 @@ class SFGPIAgent(MultiTaskAgent):
             reward_scale=1,
             tau=5e-3,
             alpha=0.2,
-            lr=1e-3,
-            policy_lr=5e-3,
+            lr=1e-4,
+            policy_lr=5e-4,
             alpha_lr=3e-4,
             gamma=0.99,
             policy_regularization=1e-3,
             n_gauss=2,
             multi_step=1,
-            updates_per_step=1,
+            updates_per_step=2,
             mini_batch_size=256,
             min_n_experience=int(2048),
             replay_buffer_size=1e6,
@@ -52,7 +52,8 @@ class SFGPIAgent(MultiTaskAgent):
             grad_clip=None,
             render=False,
             log_interval=10,
-            entropy_tuning=True,
+            entropy_tuning=False,
+            alpha_bnd=10,
             eval=True,
             eval_interval=100,
             seed=0,
@@ -121,7 +122,9 @@ class SFGPIAgent(MultiTaskAgent):
             ).item()
             # optimize log(alpha), instead of alpha
             self.log_alpha = torch.zeros(1, requires_grad=True, device=device)
+            self.alpha_bnd = config.get("alpha_bnd", True)
             self.alpha = self.log_alpha.exp()
+            self.alpha = torch.clip(self.alpha, -self.alpha_bnd, self.alpha_bnd)
             self.alpha_optimizer = Adam([self.log_alpha], lr=self.alpha_lr)
         else:
             self.alpha = torch.tensor(config.get("alpha", 0.2)).to(device)
@@ -187,7 +190,7 @@ class SFGPIAgent(MultiTaskAgent):
         sf_optim, sf, sf_tar = self.sf_optims[i], self.sfs[i], self.sf_tars[i]
         pol_optim, pol = self.pol_optims[i], self.pols[i]
 
-        sf_loss, mean_sf = self.calc_sf_loss(batch, sf, sf_tar, pol)
+        sf_loss, mean_sf, target_sf = self.calc_sf_loss(batch, sf, sf_tar, pol)
         pol_loss, logp = self.calc_pol_loss(batch, sf_tar, pol)
 
         update_params(sf_optim[0], sf.SF0, sf_loss[0], self.grad_clip)
@@ -198,6 +201,7 @@ class SFGPIAgent(MultiTaskAgent):
             entropy_loss = self.calc_entropy_loss(logp)
             update_params(self.alpha_optimizer, None, entropy_loss)
             self.alpha = self.log_alpha.exp()
+            self.alpha = torch.clip(self.alpha, -self.alpha_bnd, self.alpha_bnd)
             wandb.log(
                 {
                     "loss/alpha": entropy_loss.detach().item(),
@@ -215,6 +219,7 @@ class SFGPIAgent(MultiTaskAgent):
                 "loss/sfloss_var": sf_loss_var,
                 "state/mean_SF0": mean_sf[0],
                 "state/mean_SF1": mean_sf[1],
+                "state/target_sf": target_sf.detach().mean().item(),
                 "state/logp": logp.detach().mean().item(),
                 "task/task_idx": self.task_idx,
                 "task/policy_idx": self.policy_idx,
@@ -242,7 +247,7 @@ class SFGPIAgent(MultiTaskAgent):
         sf0_loss = F.mse_loss(cur_sf0, target_sf)
         sf1_loss = F.mse_loss(cur_sf1, target_sf)
 
-        return (sf0_loss, sf1_loss), (mean_sf0, mean_sf1)
+        return (sf0_loss, sf1_loss), (mean_sf0, mean_sf1), target_sf
 
     def calc_pol_loss(self, batch, sf_tar, pol):
         (observations, _, _, _, _, _) = batch
@@ -251,6 +256,7 @@ class SFGPIAgent(MultiTaskAgent):
         sf0, sf1 = sf_tar(observations, act)
         q_hat0, q_hat1 = torch.sum(self.w * sf0, 1), torch.sum(self.w * sf1, 1)
         q_hat = torch.min(q_hat0, q_hat1)
+        q_hat *= self.reward_scale
 
         reg_loss = self.reg_loss(pol)
         loss = torch.mean(self.alpha * logp - q_hat) + reg_loss
@@ -409,11 +415,12 @@ if __name__ == "__main__":
     if env == "multitaskpid-v0":
         env_config = {
             "DBG": False,
+            "duration": 10000,
             "simulation": {
                 "gui": render,
                 "enable_meshes": True,
                 "auto_start_simulation": auto_start_simulation,
-                "position": (0, 0, 0.05),  # initial spawned position
+                # "position": (0, 0, 25),  # initial spawned position
             },
             "observation": {
                 "DBG_ROS": False,
@@ -423,9 +430,26 @@ if __name__ == "__main__":
             "action": {
                 "DBG_ACT": False,
                 "act_noise_stdv": 0.0,
+                "thrust_range": [-0.2, 0.2],
             },
             "target": {
                 "DBG_ROS": False,
+            },
+            "tasks": {
+                "tracking": {
+                    "ori_diff": np.array([0.0, 0.0, 0.0, 0.0]),
+                    "ang_diff": np.array([0.0, 0.0, 0.0]),
+                    "angvel_diff": np.array([0.0, 0.0, 0.0]),
+                    "pos_diff": np.array([0.0, 0.0, 10.0]),
+                    "vel_diff": np.array([0.0, 0.0, 0.0]),
+                    "vel_norm_diff": np.array([0.0]),
+                },
+                "constraint": {
+                    "action_cost": np.array([0.001]),
+                    "pos_ubnd_cost": np.array([0.0, 0.0, 0.1]),  # x,y,z
+                    "pos_lbnd_cost": np.array([0.0, 0.0, 0.1]),  # x,y,z
+                },
+                "success": {"pos": np.array([0.0, 0.0, 100.0])},  # x,y,z
             },
         }
         env_kwargs = {"config": env_config}
