@@ -102,12 +102,12 @@ class PositionPID(AttitudePID):
     CONFIG = {
         "ctrl_config": {
             "row": {
-                "pid_param": np.array([1.0, 0.3, 0.1]),
+                "pid_param": np.array([1.0, 0.5, 0.1]),
                 "gain": 1.0,
                 "d_from_sensor": False,
             },
             "pitch": {
-                "pid_param": np.array([1.0, 0.3, 0.1]),
+                "pid_param": np.array([1.0, 0.5, 0.1]),
                 "gain": 1.0,
                 "d_from_sensor": False,
             },
@@ -117,18 +117,18 @@ class PositionPID(AttitudePID):
                 "d_from_sensor": False,
             },
             "x": {
-                "pid_param": np.array([1.0, 0.05, 0.7]),
-                "gain": 0.12,
+                "pid_param": np.array([1.0, 0.2, 0.5]),
+                "gain": 0.2,
                 "d_from_sensor": False,
             },
             "y": {
-                "pid_param": np.array([1.0, 0.05, 0.7]),
-                "gain": 0.12,
+                "pid_param": np.array([1.0, 0.2, 0.5]),
+                "gain": 0.2,
                 "d_from_sensor": False,
             },
             "z": {
-                "pid_param": np.array([1.0, 0.05, 0.8]),
-                "gain": 1.0,
+                "pid_param": np.array([1.0, 0.4, 3]),
+                "gain": 1.5,
                 "d_from_sensor": False,
             },
         },

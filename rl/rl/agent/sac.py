@@ -3,16 +3,16 @@ import torch
 import torch.nn.functional as F
 from torch.optim import Adam
 import wandb
-from common.policy import GaussianPolicy
-from common.util import (
+from agent.common.policy import GaussianPolicy
+from agent.common.util import (
     assert_shape,
     hard_update,
     soft_update,
     grad_false,
     update_params,
 )
-from common.value_function import TwinnedQNetwork
-from common.agent import BasicAgent
+from agent.common.value_function import TwinnedQNetwork
+from agent.common.agent import BasicAgent, MultiTaskAgent
 
 torch.autograd.set_detect_anomaly(True)  # detect NaN
 
@@ -20,7 +20,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 EPS = 1e-6
 
 
-class SACAgent(BasicAgent):
+class SACAgent(MultiTaskAgent):
     """SAC
     Tuomas Haarnoja, Soft Actor-Critic: Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor
     see https://github.com/haarnoja/sac/blob/master/sac/algos/sac.py
@@ -183,8 +183,9 @@ class SACAgent(BasicAgent):
             wandb.log(metrics)
 
     def calc_critic_loss(self, batch):
-        curr_q1, curr_q2 = self.calc_current_q(*batch)
-        target_q = self.calc_target_q(*batch)
+        (observations, features, actions, rewards, next_observations, dones) = batch
+        curr_q1, curr_q2 = self.calc_current_q(observations, actions)
+        target_q = self.calc_target_q(rewards, next_observations, dones)
 
         # We log means of Q to monitor training.
         mean_q1 = curr_q1.detach().mean().item()
@@ -197,12 +198,12 @@ class SACAgent(BasicAgent):
         return q1_loss, q2_loss, mean_q1, mean_q2
 
     def calc_policy_loss(self, batch):
-        states, actions, rewards, next_states, dones = batch
+        (observations, features, actions, rewards, next_observations, dones) = batch
 
         # We re-sample actions to calculate expectations of Q.
-        sampled_action, entropy, _ = self.policy.sample(states)
+        sampled_action, entropy, _ = self.policy.sample(observations)
         # expectations of Q with clipped double Q technique
-        q1, q2 = self.critic(states, sampled_action)
+        q1, q2 = self.critic(observations, sampled_action)
         q = torch.min(q1, q2)
 
         # Policy objective is maximization of (Q + alpha * entropy).
@@ -217,11 +218,11 @@ class SACAgent(BasicAgent):
         )
         return entropy_loss
 
-    def calc_current_q(self, states, actions, rewards, next_states, dones):
+    def calc_current_q(self, states, actions):
         curr_q1, curr_q2 = self.critic(states, actions)
         return curr_q1, curr_q2
 
-    def calc_target_q(self, states, actions, rewards, next_states, dones):
+    def calc_target_q(self, rewards, next_states, dones):
 
         with torch.no_grad():
             next_actions, next_entropies, _ = self.policy.sample(next_states)
@@ -260,10 +261,65 @@ if __name__ == "__main__":
 
     # ============== sweep ==============#
     # wandb sweep rl/rl/sweep_sac.yaml
+    import benchmark_env
+    import drone_env
+    import gym
+    from drone_env.envs.script import close_simulation
 
-    env = "InvertedDoublePendulum-v4"  # Pendulum-v1, LunarLander-v2, InvertedDoublePendulum-v4, MountainCarContinuous-v0, Ant-v4
-    env_kwargs = {"continuous": True} if env == "LunarLander-v2" else {}
+    # env = "InvertedDoublePendulum-v4"  # Pendulum-v1, LunarLander-v2, InvertedDoublePendulum-v4, MountainCarContinuous-v0, Ant-v4
+    env = "multitaskpid-v0"
+    # env_kwargs = {"continuous": True} if env == "LunarLander-v2" else {}
     render = True
+    auto_start_simulation = False
+    if auto_start_simulation:
+        close_simulation()
+
+    if env == "multitaskpid-v0":
+        env_config = {
+            "DBG": False,
+            "duration": 1000,
+            "simulation": {
+                "gui": render,
+                "enable_meshes": True,
+                "auto_start_simulation": auto_start_simulation,
+                # "position": (0, 0, 25),  # initial spawned position
+            },
+            "observation": {
+                "DBG_ROS": False,
+                "DBG_OBS": False,
+                "noise_stdv": 0.0,
+                "scale_obs": True,
+                "include_raw_state": False,
+                "bnd_constraint": True,
+            },
+            "action": {
+                "DBG_ACT": False,
+                "act_noise_stdv": 0.0,
+                "thrust_range": [-0.25, 0.25],
+            },
+            "target": {
+                "DBG_ROS": False,
+            },
+            "tasks": {
+                "tracking": {
+                    "ori_diff": np.array([0.0, 0.0, 0.0, 0.0]),
+                    "ang_diff": np.array([0.0, 0.0, 0.0]),
+                    "angvel_diff": np.array([0.0, 0.0, 0.0]),
+                    "pos_diff": np.array([0.0, 0.0, 1.0]),
+                    "vel_diff": np.array([0.0, 0.0, 0.0]),
+                    "vel_norm_diff": np.array([0.0]),
+                },
+                "constraint": {
+                    "action_cost": np.array([0.001]),
+                    "pos_ubnd_cost": np.array([0.0, 0.0, 0.1]),  # x,y,z
+                    "pos_lbnd_cost": np.array([0.0, 0.0, 0.1]),  # x,y,z
+                },
+                "success": {"pos": np.array([0.0, 0.0, 10.0])},  # x,y,z
+            },
+        }
+        env_kwargs = {"config": env_config}
+    else:
+        env = {}
 
     default_dict = SACAgent.default_config()
     default_dict.update(

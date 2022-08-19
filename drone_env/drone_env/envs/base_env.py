@@ -105,8 +105,8 @@ class BaseEnv(ROSAbstractEnv):
         """
         self._simulate(action)
         obs, obs_info = self.observation_type.observe()
-        reward, reward_info = self._reward(obs.copy(), action, copy.deepcopy(obs_info))
-        terminal = self._is_terminal(copy.deepcopy(obs_info))
+        reward, reward_info = self._reward(obs.copy(), action, obs_info)
+        terminal = self._is_terminal(obs_info)
         info = {
             "step": self.steps,
             "obs": obs,
@@ -311,7 +311,7 @@ if __name__ == "__main__":
     }
 
     def env_step():
-        env = ENV(copy.deepcopy(env_kwargs))
+        env = ENV(env_kwargs)
         env.reset()
         for _ in range(100000):
             action = env.action_space.sample()

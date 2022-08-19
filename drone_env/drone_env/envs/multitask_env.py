@@ -22,7 +22,7 @@ class MultiTaskEnv(BaseEnv):
         config = super().default_config()
         config["simulation"].update(
             {
-                "simulation_time_step": 0.005,  # 0.001 or 0.005 for 5x speed
+                "simulation_time_step": 0.004,  # 0.001 or 0.005 for 5x speed
             }
         )
         config["observation"].update(
@@ -30,6 +30,7 @@ class MultiTaskEnv(BaseEnv):
                 "type": "Kinematics",
                 "noise_stdv": 0.02,
                 "scale_obs": True,
+                "include_raw_state": False,
                 "bnd_constraint": True,
             }
         )
@@ -48,25 +49,25 @@ class MultiTaskEnv(BaseEnv):
         )
         config.update(
             {
-                "duration": 3000,
-                "simulation_frequency": 100,  # [hz]
-                "policy_frequency": 40,  # [hz]
+                "duration": 1500,
+                "simulation_frequency": 50,  # [hz]
+                "policy_frequency": 25,  # [hz]
                 "success_threshhold": 1,  # [meters]
                 "tasks": {
                     "tracking": {
-                        "ori_diff": np.array([0.0, 0.0, 0.0, 0.0]),
-                        "ang_diff": np.array([0.0, 0.0, 0.0]),
-                        "angvel_diff": np.array([0.0, 0.0, 0.0]),
+                        "ori_diff": np.array([1.0, 1.0, 1.0, 1.0]),
+                        "ang_diff": np.array([1.0, 1.0, 1.0]),
+                        "angvel_diff": np.array([1.0, 1.0, 1.0]),
                         "pos_diff": np.array([1.0, 1.0, 1.0]),
                         "vel_diff": np.array([1.0, 1.0, 1.0]),
-                        "vel_norm_diff": np.array([0.0]),
+                        "vel_norm_diff": np.array([1.0]),
                     },
                     "constraint": {
                         "action_cost": np.array([1.0]),
                         "pos_ubnd_cost": np.array([0.1, 0.1, 0.1]),  # x,y,z
                         "pos_lbnd_cost": np.array([0.1, 0.1, 0.1]),  # x,y,z
                     },
-                    "success": {"pos": np.array([100.0, 100.0, 100.0])},  # x,y,z
+                    "success": {"pos": np.array([10.0, 10.0, 10.0])},  # x,y,z
                 },
             }
         )
@@ -109,8 +110,8 @@ class MultiTaskEnv(BaseEnv):
         self._simulate(action)
         obs, obs_info = self.observation_type.observe()
         self.obs, self.obs_info = obs, obs_info
-        reward, reward_info = self._reward(obs.copy(), action, copy.deepcopy(obs_info))
-        terminal = self._is_terminal(copy.deepcopy(obs_info))
+        reward, reward_info = self._reward(obs.copy(), action, obs_info)
+        terminal = self._is_terminal(obs_info)
 
         info = {
             "step": self.steps,
@@ -172,7 +173,7 @@ class MultiTaskEnv(BaseEnv):
         self.w = self.get_tasks_weights()
 
     def get_tasks_weights(self):
-        tasks = copy.deepcopy(self.tasks)
+        tasks = self.tasks
         feature_weights = np.concatenate(extract_nparray_from_dict(tasks["tracking"]))
         constr_weights = np.concatenate(extract_nparray_from_dict(tasks["constraint"]))
         success_weights = np.concatenate(extract_nparray_from_dict(tasks["success"]))
@@ -267,9 +268,13 @@ class MultiTaskPIDEnv(MultiTaskEnv):
     def one_step(self, action: Action) -> Tuple[Observation, float, bool, dict]:
         obs, obs_info = self.observation_type.observe()
         base_act = self.base_ctrl.act(obs_info)
-        action[0:3] = base_act[0:3]
-        action = np.clip(action, -1, 1)
 
+        action[0] = base_act[0]
+        action[1] = base_act[1]
+        action[2] = base_act[2]
+        # action[3] = action[3]
+
+        action = np.clip(action, -1, 1)
         return super().one_step(action)
 
     def reset(self) -> Observation:
@@ -291,6 +296,9 @@ class MultiTaskPIDEnv(MultiTaskEnv):
 
         fail = False
         if obs_info["obs_dict"]["position"][2] <= -60.0:
+            fail = True
+
+        if obs_info["obs_dict"]["position"][2] >= -1:
             fail = True
 
         if self.angle_constraint:
@@ -345,7 +353,7 @@ if __name__ == "__main__":
     }
 
     def env_step():
-        env = ENV(copy.deepcopy(env_kwargs))
+        env = ENV(env_kwargs)
         env.reset()
         for _ in range(100000):
             action = env.action_space.sample()

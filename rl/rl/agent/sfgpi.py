@@ -16,7 +16,10 @@ from agent.common.util import (
 )
 from agent.common.value_function import TwinnedSFNetwork
 
-torch.autograd.set_detect_anomaly(True)  # detect NaN
+# disable api to speed up
+torch.autograd.set_detect_anomaly(False)  # detect NaN
+torch.autograd.profiler.profile(False)
+torch.autograd.profiler.emit_nvtx(False)
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 EPS = 1e-6
@@ -44,9 +47,9 @@ class SFGPIAgent(MultiTaskAgent):
             policy_regularization=1e-3,
             n_gauss=2,
             multi_step=1,
-            updates_per_step=2,
-            mini_batch_size=256,
-            min_n_experience=int(2048),
+            updates_per_step=1,
+            mini_batch_size=128,
+            min_n_experience=int(1024),
             replay_buffer_size=1e6,
             td_target_update_interval=1,
             grad_clip=None,
@@ -82,11 +85,7 @@ class SFGPIAgent(MultiTaskAgent):
         self.n_gauss = config.get("n_gauss", 5)
 
         self.net_kwargs = config["net_kwargs"]
-        self.updates_per_step = config.get("updates_per_step", 1)
         self.grad_clip = config.get("grad_clip", None)
-        self.min_n_experience = self.start_steps = int(
-            config.get("min_n_experience", int(1e4))
-        )
         self.entropy_tuning = config.get("entropy_tuning", True)
 
         self.policy_idx = -1
@@ -197,18 +196,6 @@ class SFGPIAgent(MultiTaskAgent):
         update_params(sf_optim[1], sf.SF1, sf_loss[1], self.grad_clip)
         update_params(pol_optim, pol, pol_loss, self.grad_clip)
 
-        if self.entropy_tuning:
-            entropy_loss = self.calc_entropy_loss(logp)
-            update_params(self.alpha_optimizer, None, entropy_loss)
-            self.alpha = self.log_alpha.exp()
-            self.alpha = torch.clip(self.alpha, -self.alpha_bnd, self.alpha_bnd)
-            wandb.log(
-                {
-                    "loss/alpha": entropy_loss.detach().item(),
-                    "state/alpha": self.alpha.detach().item(),
-                }
-            )
-
         if self.learn_steps % self.log_interval == 0:
             sf_loss_var = self.nsf_losses(sf_loss, self.n_rec_sfloss)
 
@@ -231,6 +218,18 @@ class SFGPIAgent(MultiTaskAgent):
 
             wandb.log(metrics)
 
+        if self.entropy_tuning:
+            entropy_loss = self.calc_entropy_loss(logp)
+            update_params(self.alpha_optimizer, None, entropy_loss)
+            self.alpha = self.log_alpha.exp()
+            self.alpha = torch.clip(self.alpha, -self.alpha_bnd, self.alpha_bnd)
+            wandb.log(
+                {
+                    "loss/alpha": entropy_loss.detach().item(),
+                    "state/alpha": self.alpha.detach().item(),
+                }
+            )
+
     def calc_sf_loss(self, batch, sf, sf_target, pol):
         (observations, features, actions, rewards, next_observations, dones) = batch
 
@@ -243,6 +242,8 @@ class SFGPIAgent(MultiTaskAgent):
 
         mean_sf0 = cur_sf0.detach().mean().item()
         mean_sf1 = cur_sf1.detach().mean().item()
+
+        assert cur_sf0.shape == target_sf.shape
 
         sf0_loss = F.mse_loss(cur_sf0, target_sf)
         sf1_loss = F.mse_loss(cur_sf1, target_sf)
@@ -258,6 +259,8 @@ class SFGPIAgent(MultiTaskAgent):
         q_hat = torch.min(q_hat0, q_hat1)
         q_hat *= self.reward_scale
 
+        assert logp.shape == q_hat.shape
+
         reg_loss = self.reg_loss(pol)
         loss = torch.mean(self.alpha * logp - q_hat) + reg_loss
         return loss, logp
@@ -268,10 +271,11 @@ class SFGPIAgent(MultiTaskAgent):
         )
         return entropy_loss
 
+    # TODO: slow
     def calc_target_sf(self, next_observations, features, dones, sf_target, pol):
         with torch.no_grad():
             n_sample = next_observations.shape[0]
-            next_actions, _, _ = pol(next_observations)
+            next_actions, _, _ = pol(next_observations)  # TODO: slow
             next_sf0, next_sf1 = sf_target(next_observations, next_actions)
 
             next_sf0 = next_sf0.view(n_sample, -1, self.feature_dim)
@@ -279,6 +283,8 @@ class SFGPIAgent(MultiTaskAgent):
 
             next_sf = torch.min(next_sf0, next_sf1)
             next_sfv = torch.logsumexp(next_sf, 1)
+
+            assert features.shape == next_sfv.shape
 
             target_sf = (features + (1 - dones) * self.gamma * next_sfv).squeeze(1)
         return target_sf, next_sfv
@@ -395,7 +401,7 @@ class SFGPIAgent(MultiTaskAgent):
 if __name__ == "__main__":
     # ============== profile ==============#
     # pip install snakeviz
-    # python -m cProfile -o out.profile rl/rl/agent/sfgpi.py -s time
+    # python -m cProfile -o sfgpi.profile rl/rl/agent/sfgpi.py -s time
     # snakeviz sfgpi.profile
 
     # ============== sweep ==============#
@@ -415,7 +421,7 @@ if __name__ == "__main__":
     if env == "multitaskpid-v0":
         env_config = {
             "DBG": False,
-            "duration": 10000,
+            "duration": 1000,
             "simulation": {
                 "gui": render,
                 "enable_meshes": True,
@@ -426,11 +432,14 @@ if __name__ == "__main__":
                 "DBG_ROS": False,
                 "DBG_OBS": False,
                 "noise_stdv": 0.0,
+                "scale_obs": True,
+                "include_raw_state": False,
+                "bnd_constraint": True,
             },
             "action": {
                 "DBG_ACT": False,
                 "act_noise_stdv": 0.0,
-                "thrust_range": [-0.2, 0.2],
+                "thrust_range": [-0.25, 0.25],
             },
             "target": {
                 "DBG_ROS": False,
@@ -440,7 +449,7 @@ if __name__ == "__main__":
                     "ori_diff": np.array([0.0, 0.0, 0.0, 0.0]),
                     "ang_diff": np.array([0.0, 0.0, 0.0]),
                     "angvel_diff": np.array([0.0, 0.0, 0.0]),
-                    "pos_diff": np.array([0.0, 0.0, 10.0]),
+                    "pos_diff": np.array([0.0, 0.0, 1.0]),
                     "vel_diff": np.array([0.0, 0.0, 0.0]),
                     "vel_norm_diff": np.array([0.0]),
                 },
@@ -449,7 +458,7 @@ if __name__ == "__main__":
                     "pos_ubnd_cost": np.array([0.0, 0.0, 0.1]),  # x,y,z
                     "pos_lbnd_cost": np.array([0.0, 0.0, 0.1]),  # x,y,z
                 },
-                "success": {"pos": np.array([0.0, 0.0, 100.0])},  # x,y,z
+                "success": {"pos": np.array([0.0, 0.0, 10.0])},  # x,y,z
             },
         }
         env_kwargs = {"config": env_config}

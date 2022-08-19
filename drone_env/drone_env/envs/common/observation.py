@@ -329,7 +329,7 @@ class KinematicsObservation(ROSObservation):
             obs, obs_dict = self._observe()
         return obs, obs_dict
 
-    def _observe(self) -> np.ndarray:
+    def _observe(self) -> np.ndarray:  # TODO: slow
         goal_dict = self.env.goal
         obs_dict = {
             "position": self.pos_data,
@@ -355,8 +355,7 @@ class KinematicsObservation(ROSObservation):
         proc_dict = self.process_obs(obs_dict, goal_dict, constr_dict, self.scale_obs)
         proc_dict.update({"actuator": actuator})
 
-        proc_df = pd.DataFrame.from_records([proc_dict])
-        processed = np.hstack(proc_df[self.obs_name].values[0])
+        processed = np.hstack([v for k, v in proc_dict.items()])
 
         obs_info = dict(
             obs_dict=obs_dict,
@@ -407,18 +406,24 @@ class KinematicsObservation(ROSObservation):
             "pos_diff": obs_pos - goal_pos,
             "vel_diff": obs_vel - goal_vel,
             "vel_norm_diff": np.linalg.norm(obs_vel - goal_vel),
-            "ori": obs_ori,
-            "ang": obs_ang,
-            "angvel": obs_angvel,
-            "pos": obs_pos,
-            "vel": obs_vel,
-            "acc": obs_acc,
-            "goal_ori": goal_ori,
-            "goal_ang": goal_ang,
-            "goal_angvel": goal_angvel,
-            "goal_pos": goal_pos,
-            "goal_vel": goal_vel,
         }
+
+        if self.include_raw_state:
+            state_dict.update(
+                {
+                    "ori": obs_ori,
+                    "ang": obs_ang,
+                    "angvel": obs_angvel,
+                    "pos": obs_pos,
+                    "vel": obs_vel,
+                    "acc": obs_acc,
+                    "goal_ori": goal_ori,
+                    "goal_ang": goal_ang,
+                    "goal_angvel": goal_angvel,
+                    "goal_pos": goal_pos,
+                    "goal_vel": goal_vel,
+                }
+            )
 
         if self.bnd_constraint:
             ubnd_pos, lbnd_pos = (
@@ -432,18 +437,16 @@ class KinematicsObservation(ROSObservation):
                 }
             )
 
-        if scale_obs:  # TODO: separate noise from scale
-            state_dict = self.scale_obs_dict(state_dict, self.noise_stdv)
-
-        return state_dict
-
-    def scale_obs_dict(self, state_dict: dict, noise_level: float = 0.0) -> dict:
         for key, val in state_dict.items():
-            proc = utils.lmap(val, self.range_dict[key], [-1, 1])
-            proc += np.random.normal(0, noise_level, proc.shape)
+            proc = self.scale_value(key, val) if scale_obs else val
+            proc += np.random.normal(0, self.noise_stdv, proc.shape)
             proc = np.clip(proc, -1, 1)
             state_dict[key] = proc
+
         return state_dict
+
+    def scale_value(self, key, value):
+        return utils.lmap(value, self.range_dict[key], [-1, 1])
 
     def compute_ang_diff(self, ang_diff):
         ang_diff[ang_diff > np.pi] -= 2 * np.pi
@@ -539,18 +542,17 @@ class PlanarKinematicsObservation(ROSObservation):
             "yaw_vel": obs_dict["angular_velocity"][2],
         }
 
-        if scale_obs:
-            state_dict = self.scale_obs_dict(state_dict, self.noise_stdv)
-
-        return state_dict
-
-    def scale_obs_dict(self, state_dict: dict, noise_level: float = 0.0) -> dict:
         for key, val in state_dict.items():
-            proc = utils.lmap(val, self.range_dict[key], [-1, 1])
-            proc += np.random.normal(0, noise_level, proc.shape)
+            proc = self.scale_value(key, val) if scale_obs else val
+            proc += np.random.normal(0, self.noise_stdv, proc.shape)
             proc = np.clip(proc, -1, 1)
             state_dict[key] = proc
+
         return state_dict
+
+    def scale_value(self, key, value):
+        proc = utils.lmap(value, self.range_dict[key], [-1, 1])
+        return proc
 
 
 def observation_factory(env: "AbstractEnv", config: dict) -> ObservationType:
