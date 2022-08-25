@@ -10,8 +10,3 @@ register(
     id="multitask-v0",
     entry_point="drone_env.envs:MultiTaskEnv",
 )
-
-register(
-    id="multitaskpid-v0",
-    entry_point="drone_env.envs:MultiTaskPIDEnv",
-)

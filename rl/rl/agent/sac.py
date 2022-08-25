@@ -124,26 +124,21 @@ class SACAgent(MultiTaskAgent):
         if self.steps % self.eval_interval == 0:
             self.evaluate()
 
-    def act(self, state):
-        if self.start_steps > self.steps:
-            action = self.env.action_space.sample()
-        else:
-            action = self.explore(state)
-        return action
-
-    def explore(self, state):
+    def explore(self, state, w):
         # act with randomness
-        state = torch.FloatTensor(state).unsqueeze(0).to(device)
+        # state = torch.FloatTensor(state).unsqueeze(0).to(device)
         with torch.no_grad():
             action, _, _ = self.policy.sample(state)
-        return action.cpu().numpy().reshape(-1)
+        return action
+        # return action.cpu().numpy().reshape(-1)
 
-    def exploit(self, state):
+    def exploit(self, state, w):
         # act without randomness
-        state = torch.FloatTensor(state).unsqueeze(0).to(device)
+        # state = torch.FloatTensor(state).unsqueeze(0).to(device)
         with torch.no_grad():
             _, _, action = self.policy.sample(state)
-        return action.cpu().numpy().reshape(-1)
+        return action
+        # return action.cpu().numpy().reshape(-1)
 
     def learn(self):
         self.learn_steps += 1
@@ -232,25 +227,6 @@ class SACAgent(MultiTaskAgent):
         target_q = self.reward_scale * rewards + (1.0 - dones) * self.gamma * next_q
 
         return target_q
-
-    def evaluate(self):
-        episodes = 10
-        returns = np.zeros((episodes,), dtype=np.float32)
-
-        for i in range(episodes):
-            state = self.env.reset()
-            episode_reward = 0.0
-            done = False
-            while not done:
-                action = self.exploit(state)
-                next_state, reward, done, _ = self.env.step(action)
-                episode_reward += reward
-                state = next_state
-            returns[i] = episode_reward
-
-        mean_return = np.mean(returns)
-
-        wandb.log({"reward/test": mean_return})
 
 
 if __name__ == "__main__":

@@ -204,7 +204,7 @@ class FixedGoal(RandomGoal):
         range_dict: dict = dict(
             x_range=(-0, 0),
             y_range=(-0, 0),
-            z_range=(-10, -10),
+            z_range=(-10, -30),
             v_range=(-0.0, 1),
             phi_range=(-0, 0),
             the_range=(-0, 0),

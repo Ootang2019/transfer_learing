@@ -109,7 +109,7 @@ def check_action(action, action_dim):
 
 
 def np2ts(obj):
-    if isinstance(obj, np.ndarray):
+    if isinstance(obj, np.ndarray) or isinstance(obj, float):
         obj = torch.tensor(obj, dtype=torch.float32).to(device)
     return obj
 

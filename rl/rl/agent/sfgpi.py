@@ -1,18 +1,21 @@
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
 import numpy as np
 import torch
 import torch.nn.functional as F
-import wandb
 from torch.optim import Adam
 
+import wandb
+from agent.common.teacher import PositionPID
 from agent.common.agent import MultiTaskAgent
 from agent.common.policy import GaussianPolicy, GMMPolicy
 from agent.common.util import (
+    generate_grid_schedule,
     grad_false,
     hard_update,
     soft_update,
-    update_params,
     ts2np,
-    generate_grid_schedule,
+    update_params,
 )
 from agent.common.value_function import TwinnedSFNetwork
 
@@ -20,6 +23,8 @@ from agent.common.value_function import TwinnedSFNetwork
 torch.autograd.set_detect_anomaly(False)  # detect NaN
 torch.autograd.profiler.profile(False)
 torch.autograd.profiler.emit_nvtx(False)
+
+Observation = Union[np.ndarray, float]
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 EPS = 1e-6
@@ -37,7 +42,7 @@ class SFGPIAgent(MultiTaskAgent):
             env="InvertedDoublePendulum-v4",
             env_kwargs={},
             total_timesteps=int(1e6),
-            reward_scale=1,
+            reward_scale=10,
             tau=5e-3,
             alpha=0.2,
             lr=1e-4,
@@ -88,13 +93,8 @@ class SFGPIAgent(MultiTaskAgent):
         self.grad_clip = config.get("grad_clip", None)
         self.entropy_tuning = config.get("entropy_tuning", True)
 
-        self.policy_idx = -1
-        self.sfs, self.sf_tars, self.sf_optims = [], [], []
-        self.pols, self.pol_optims = [], []
-
         self.task_idx = 0
         self.prev_ws = []
-
         self.task_schedule = config.get("task_schedule", "manual")
         if self.task_schedule == "manual":
             task_manual = config.get("task_manual")
@@ -107,10 +107,17 @@ class SFGPIAgent(MultiTaskAgent):
             )
             self.w = self.w_schedule[self.task_idx]
 
-        self.update_task(self.w)
+        self.create_policy = False
+        self.sfs, self.sf_tars, self.sf_optims = [], [], []
+        self.pols, self.pol_optims = [], []
+        self.policy_idx = -1
+
         self.learn_all_tasks = False
-        self.n_sf_losses = []
-        self.n_rec_sfloss = config.get("n_rec_sfloss", 40)
+        self.update_task(self.w)  # update task weights
+        self.create_sf_policy()  # create a policy
+
+        self.nsf_losses = []
+        self.nrec_sfloss = config.get("n_rec_sfloss", 40)
         self.task_thresh_sfloss = config.get("new_task_threshold_sfloss", 40)
 
         if self.entropy_tuning:
@@ -164,7 +171,7 @@ class SFGPIAgent(MultiTaskAgent):
                 _, _, act = self.pols[i](obs)
             sf0, sf1 = self.sfs[i](obs, act)
             sf = torch.min(sf0, sf1)
-            q = torch.sum(w * sf, 1)
+            q = torch.matmul(sf, w)
 
             acts.append(act)
             qs.append(q)
@@ -197,7 +204,7 @@ class SFGPIAgent(MultiTaskAgent):
         update_params(pol_optim, pol, pol_loss, self.grad_clip)
 
         if self.learn_steps % self.log_interval == 0:
-            sf_loss_var = self.nsf_losses(sf_loss, self.n_rec_sfloss)
+            sf_loss_var = self.get_sf_losses_var(sf_loss, self.nrec_sfloss)
 
             metrics = {
                 "loss/SF0": sf_loss[0].detach().item(),
@@ -255,7 +262,10 @@ class SFGPIAgent(MultiTaskAgent):
         act, logp, _ = pol(observations)
 
         sf0, sf1 = sf_tar(observations, act)
-        q_hat0, q_hat1 = torch.sum(self.w * sf0, 1), torch.sum(self.w * sf1, 1)
+
+        q_hat0 = torch.matmul(sf0, self.w)
+        q_hat1 = torch.matmul(sf1, self.w)
+
         q_hat = torch.min(q_hat0, q_hat1)
         q_hat *= self.reward_scale
 
@@ -271,11 +281,10 @@ class SFGPIAgent(MultiTaskAgent):
         )
         return entropy_loss
 
-    # TODO: slow
     def calc_target_sf(self, next_observations, features, dones, sf_target, pol):
         with torch.no_grad():
             n_sample = next_observations.shape[0]
-            next_actions, _, _ = pol(next_observations)  # TODO: slow
+            next_actions, _, _ = pol(next_observations)
             next_sf0, next_sf1 = sf_target(next_observations, next_actions)
 
             next_sf0 = next_sf0.view(n_sample, -1, self.feature_dim)
@@ -294,15 +303,28 @@ class SFGPIAgent(MultiTaskAgent):
         loss = pol.reg_loss() if callable(reg) else 0
         return loss
 
-    def nsf_losses(self, sf_loss, n_record):
+    def get_sf_losses_var(self, sf_loss, n_record):
         sf_loss = torch.min(sf_loss[0], sf_loss[1])
-        self.n_sf_losses.append(ts2np(sf_loss))
-        if len(self.n_sf_losses) > n_record:
-            self.n_sf_losses.pop(0)
-        return np.array(self.n_sf_losses).var()
+        self.nsf_losses.append(ts2np(sf_loss))
+        if len(self.nsf_losses) > n_record:
+            self.nsf_losses.pop(0)
+        return np.array(self.nsf_losses).var()
 
-    def create_policy(self):
+    def create_sf_policy(self):
         """create new set of policies and successor features"""
+        sf, sf_target, sf_optimizer = self.create_sf()
+        policy, policy_optimizer = self.create_pol()
+
+        self.sfs.append(sf)
+        self.sf_tars.append(sf_target)
+        self.sf_optims.append(sf_optimizer)
+        self.pols.append(policy)
+        self.pol_optims.append(policy_optimizer)
+
+        self.create_policy = True
+        self.policy_idx += 1
+
+    def create_sf(self):
         sf = TwinnedSFNetwork(
             observation_dim=self.observation_dim,
             feature_dim=self.feature_dim,
@@ -325,7 +347,9 @@ class SFGPIAgent(MultiTaskAgent):
             Adam(sf.SF0.parameters(), lr=self.lr),
             Adam(sf.SF1.parameters(), lr=self.lr),
         )
+        return sf, sf_target, sf_optimizer
 
+    def create_pol(self):
         policy = GMMPolicy(
             observation_dim=self.observation_dim,
             action_dim=self.action_dim,
@@ -334,50 +358,34 @@ class SFGPIAgent(MultiTaskAgent):
             reg=self.pol_reg,
         ).to(device)
         policy_optimizer = Adam(policy.parameters(), lr=self.pol_lr)
-
-        self.sfs.append(sf)
-        self.sf_tars.append(sf_target)
-        self.sf_optims.append(sf_optimizer)
-        self.pols.append(policy)
-        self.pol_optims.append(policy_optimizer)
-        self.policy_idx += 1
-        self.n_sf_losses = []
+        return policy, policy_optimizer
 
     def change_task(self):
         """if a current task is mastered then update task according to schedule"""
-        if self.master_curtask():
-
+        if self.master_current_task():
             if self.task_idx < len(self.w_schedule):
                 self.task_idx += 1
                 w = self.w_schedule[self.task_idx]
                 self.update_task(w)
+                if self.create_new_pol(w):
+                    self.create_sf_policy()
+                    self.nsf_losses = []
             else:
                 print("no more task to learn")
                 return True
-
         return None
 
-    def master_curtask(self):
+    def master_current_task(self):
         master = False
 
-        var = np.array(self.n_sf_losses).var()
-        if var < self.task_thresh_sfloss and len(self.n_sf_losses) >= self.n_rec_sfloss:
+        var = np.array(self.nsf_losses).var()
+        if var < self.task_thresh_sfloss and len(self.nsf_losses) >= self.nrec_sfloss:
             master = True
 
         return master
 
     def update_task(self, w):
-        """update task and create corresponding policy and successor feature
-
-        Args:
-            w (np.array): task
-        """
-        self.update_w(w)
-
-        if self.create_new_pol(w):
-            self.create_policy()
-
-    def update_w(self, w):
+        """update task"""
         self.w = torch.tensor(w, dtype=torch.float32).to(device)
         self.env.w = w
         self.prev_ws.append(w)
@@ -387,15 +395,134 @@ class SFGPIAgent(MultiTaskAgent):
         """should we create new set of policies"""
         b = False
 
-        if self.policy_idx == -1:
+        if not self.create_policy:
             b = True
 
-        for prev_w in self.prev_ws:
-            l = np.linalg.norm(w / self.feature_scale - prev_w / self.feature_scale)
-            if l > 1.0:
-                b = True
+        # for prev_w in self.prev_ws:
+        #     l = np.linalg.norm(w / self.feature_scale - prev_w / self.feature_scale)
+        #     if l > 1.0:
+        #         b = True
 
         return b
+
+
+class TEACHER_SFGPI(SFGPIAgent):
+    @classmethod
+    def default_config(cls) -> dict:
+        config = super().default_config()
+        return config
+
+    def __init__(self, config: Optional[Dict[Any, Any]] = None) -> None:
+        super().__init__(config)
+
+        self.n_teacher_episodes = 100  # run teacher n episodes
+        self.teacher_freq = 50  # can we tune PID based on policy freq?
+        self.teacher = PositionPID(delta_t=1 / self.teacher_freq)
+        self.teacher.reset()
+        self.tsf, self.tsf_tar, self.tsf_optim = self.create_sf()
+
+    def explore(self, obs, w):
+        acts, qs = self.gpe(obs, w, "explore")
+        tact, tq = self.tgpe(obs, w)
+        acts.append(tact)
+        qs.append(tq)
+        act = self.gpi(acts, qs)
+        return act
+
+    def exploit(self, obs, w):
+        acts, qs = self.gpe(obs, w, "exploit")
+        tact, tq = self.tgpe(obs, w)
+        acts.append(tact)
+        qs.append(tq)
+        act = self.gpi(acts, qs)
+        return act
+
+    def tgpe(self, obs, w):
+        tact = self.teacher.act(obs)
+        tsf0, tsf1 = self.tsf(obs, tact)
+        tsf = torch.min(tsf0, tsf1)
+        tq = torch.matmul(tsf, w)
+        return tact, tq
+
+    def run(self):
+        print("========= training teacher sf =========")
+        self.train_teacher_sf()
+        print("========= finish training teacher sf =========")
+        return super().run()
+
+    def train_teacher_sf(self):
+        """collect some data and train teacher sf"""
+        for _ in range(self.n_teacher_episodes):
+            episode_reward = 0
+            self.episodes += 1
+            episode_steps = 0
+            done = False
+            self.teacher.reset()
+            observation, info = self.env.reset()
+            feature = info["features"]
+
+            while not done:
+                action = self.teacher.act(observation)
+                next_observation, reward, done, info = self.env.step(action)
+                next_feature = info["features"]
+                self.steps += 1
+                episode_steps += 1
+                episode_reward += reward
+                masked_done = False if episode_steps >= self.max_episode_steps else done
+
+                self.replay_buffer.append(
+                    observation,
+                    feature,
+                    action,
+                    reward,
+                    next_observation,
+                    masked_done,
+                    episode_done=done,
+                )
+                if self.is_update():
+                    for _ in range(self.updates_per_step):
+                        self.learn_tsf()
+
+                observation = next_observation
+                feature = next_feature
+
+            if self.episodes % self.log_interval == 0:
+                wandb.log({"teacher/reward": episode_reward})
+
+    def learn_tsf(self):
+        self.learn_steps += 1
+
+        if self.learn_steps % self.td_target_update_interval == 0:
+            soft_update(self.tsf_tar, self.tsf, self.tau)
+
+        batch = self.replay_buffer.sample(self.mini_batch_size)
+
+        (
+            tsf_loss,
+            mean_tsf,
+            target_tsf,
+        ) = self.calc_sf_loss(batch, self.tsf, self.tsf_tar, self.teacher)
+
+        update_params(self.tsf_optim[0], self.tsf.SF0, tsf_loss[0], self.grad_clip)
+        update_params(self.tsf_optim[1], self.tsf.SF1, tsf_loss[1], self.grad_clip)
+
+        if self.learn_steps % self.log_interval == 0:
+            sf_loss_var = self.get_sf_losses_var(tsf_loss, self.nrec_sfloss)
+
+            metrics = {
+                "teacher/tSF0_loss": tsf_loss[0].detach().item(),
+                "teacher/tSF1_loss": tsf_loss[1].detach().item(),
+                "teacher/tsfloss_var": sf_loss_var,
+                "teacher/mean_tSF0": mean_tsf[0],
+                "teacher/mean_tSF1": mean_tsf[1],
+                "teacher/target_tsf": target_tsf.detach().mean().item(),
+            }
+
+            w = ts2np(self.w)
+            for i in range(w.shape[0]):
+                metrics[f"task/{i}"] = w[i]
+
+            wandb.log(metrics)
 
 
 if __name__ == "__main__":
@@ -411,14 +538,17 @@ if __name__ == "__main__":
     import gym
     from drone_env.envs.script import close_simulation
 
-    env = "multitaskpid-v0"
+    Agent = TEACHER_SFGPI  # SFGPIAgent, TEACHER_SFGPI
+
+    env = "multitask-v0"
     # env = "myInvertedDoublePendulum-v4"
     render = True
     auto_start_simulation = False
     if auto_start_simulation:
         close_simulation()
 
-    if env == "multitaskpid-v0":
+    env_kwargs = {}
+    if env == "multitask-v0":
         env_config = {
             "DBG": False,
             "duration": 1000,
@@ -433,7 +563,7 @@ if __name__ == "__main__":
                 "DBG_OBS": False,
                 "noise_stdv": 0.0,
                 "scale_obs": True,
-                "include_raw_state": False,
+                "include_raw_state": True,
                 "bnd_constraint": True,
             },
             "action": {
@@ -462,27 +592,22 @@ if __name__ == "__main__":
             },
         }
         env_kwargs = {"config": env_config}
-    else:
-        env = {}
 
-    # task_schedule = "Manual"
-    # task_manual = np.array([np.array([0, 0, 0, 0, 0]), np.array([1, 1, 1, 1, 1])])
-    task_schedule = None
-    task_manual = None
-
-    default_dict = SFGPIAgent.default_config()
+    default_dict = Agent.default_config()
     default_dict.update(
         dict(
             env=env,
             env_kwargs=env_kwargs,
             render=render,
-            task_schedule=task_schedule,
-            task_manual=task_manual,
+            task_schedule=None,
+            task_manual=None,
+            min_batch_size=int(2),
+            min_n_experience=int(10),
         )
     )
 
     wandb.init(config=default_dict)
     print(wandb.config)
 
-    agent = SFGPIAgent(wandb.config)
+    agent = Agent(wandb.config)
     agent.run()

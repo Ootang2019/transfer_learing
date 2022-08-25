@@ -5,7 +5,9 @@ import wandb
 from rltorch.memory import MultiStepMemory
 from agent.common.replay_buffer import MyMultiStepMemory
 from agent.common.util import np2ts, ts2np, check_action
+import warnings
 
+warnings.simplefilter("once", UserWarning)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
@@ -210,6 +212,7 @@ class MultiTaskAgent(BasicAgent):
             self.gamma,
             self.multi_step,
         )
+        self.obs_info = {}
 
     def train_episode(self):
         episode_reward = 0
@@ -217,23 +220,22 @@ class MultiTaskAgent(BasicAgent):
         episode_steps = 0
         done = False
         observation, info = self.env.reset()
-        feature = info["features"]
+        feature, self.obs_info = info["features"], info
 
         while not done:
-            # if self.render:
-            # self.env.render()
+            if self.render:
+                try:
+                    self.env.render()
+                except:
+                    warnings.warn("env has no rendering method")
 
             action = self.act(observation)
             next_observation, reward, done, info = self.env.step(action)
-            next_feature = info["features"]
+            next_feature, self.obs_info = info["features"], info
             self.steps += 1
             episode_steps += 1
             episode_reward += reward
-
-            if episode_steps >= self.max_episode_steps:
-                masked_done = False
-            else:
-                masked_done = done
+            masked_done = False if episode_steps >= self.max_episode_steps else done
 
             self.replay_buffer.append(
                 observation,
@@ -294,7 +296,6 @@ class MultiTaskAgent(BasicAgent):
             act_ts = self.exploit(obs_ts, w_ts)
 
         act = ts2np(act_ts)
-
         act = check_action(act, self.action_dim)
         return act
 
@@ -302,4 +303,10 @@ class MultiTaskAgent(BasicAgent):
         raise NotImplementedError
 
     def exploit(self, obs, w):
+        raise NotImplementedError
+
+    def change_task(self):
+        raise NotImplementedError
+
+    def master_current_task(self):
         raise NotImplementedError

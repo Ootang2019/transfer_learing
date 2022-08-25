@@ -105,6 +105,8 @@ class GaussianPolicy(BaseNetwork):
         return mean, log_std
 
     def sample(self, obs):
+        if obs.dim() == 1:
+            obs = obs.unsqueeze(0)
         # calculate Gaussian distribusion of (mean, std)
         means, log_stds = self.forward(obs)
         stds = log_stds.exp()
@@ -114,6 +116,7 @@ class GaussianPolicy(BaseNetwork):
         actions = torch.tanh(xs)
         # calculate entropies
         log_probs = normals.log_prob(xs) - torch.log(1 - actions.pow(2) + self.eps)
+
         entropies = -log_probs.sum(dim=1, keepdim=True)
 
         return actions, entropies, torch.tanh(means)

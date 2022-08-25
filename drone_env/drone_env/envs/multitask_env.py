@@ -8,7 +8,6 @@ import numpy as np
 import rospy
 from drone_env.envs.base_env import BaseEnv
 from drone_env.envs.common.action import Action
-from drone_env.envs.common.teacher import AttitudePID, PositionPID
 from drone_env.envs.common.utils import extract_nparray_from_dict
 from gym.spaces import Box
 import copy
@@ -22,7 +21,7 @@ class MultiTaskEnv(BaseEnv):
         config = super().default_config()
         config["simulation"].update(
             {
-                "simulation_time_step": 0.004,  # 0.001 or 0.005 for 5x speed
+                "simulation_time_step": 0.005,  # 0.001 or 0.005 for 5x speed
             }
         )
         config["observation"].update(
@@ -30,7 +29,7 @@ class MultiTaskEnv(BaseEnv):
                 "type": "Kinematics",
                 "noise_stdv": 0.02,
                 "scale_obs": True,
-                "include_raw_state": False,
+                "include_raw_state": True,
                 "bnd_constraint": True,
             }
         )
@@ -69,6 +68,7 @@ class MultiTaskEnv(BaseEnv):
                     },
                     "success": {"pos": np.array([10.0, 10.0, 10.0])},  # x,y,z
                 },
+                "angle_reset": True,  # reset env if roll and pitch too large
             }
         )
         return config
@@ -76,6 +76,7 @@ class MultiTaskEnv(BaseEnv):
     def __init__(self, config: Optional[Dict[Any, Any]] = None) -> None:
         super().__init__(config)
 
+        self.angle_reset = self.config.get("angle_reset", True)
         self.max_episode_steps = self.config["duration"]
         self.tasks = self.config["tasks"]
 
@@ -166,7 +167,9 @@ class MultiTaskEnv(BaseEnv):
 
         obs, obs_info = self.observation_type.observe()
         self.obs, self.obs_info = obs, obs_info
-        return obs, {"features": self.calc_features(obs, obs_info)}
+
+        obs_info["features"] = self.calc_features(obs, obs_info)
+        return obs, obs_info
 
     def update_tasks(self, task: dict):
         self.tasks = task
@@ -237,6 +240,20 @@ class MultiTaskEnv(BaseEnv):
         success = False
 
         fail = False
+        if obs_info["obs_dict"]["position"][2] <= -60.0:
+            fail = True
+
+        if obs_info["obs_dict"]["position"][2] >= -1:
+            fail = True
+
+        if self.angle_reset:
+            row = obs_info["obs_dict"]["angle"][0]
+            if (row > np.pi - 1) or (row < -np.pi + 1):
+                fail = True
+
+            pitch = obs_info["obs_dict"]["angle"][1]
+            if (pitch > np.pi - 1) or (pitch < -np.pi + 1):
+                fail = True
 
         return time or success or fail
 
@@ -251,66 +268,6 @@ class MultiTaskEnv(BaseEnv):
             self.target_type.sample_new_goal(origin=np.array([pos[1], pos[0], -pos[2]]))
         elif self.config["target"]["type"] == "FixedGoal":
             self.target_type.sample_new_goal()
-
-
-class MultiTaskPIDEnv(MultiTaskEnv):
-    def default_config(cls) -> dict:
-        config = super().default_config()
-        config.update({"angle_constraint": True})
-        return config
-
-    def __init__(self, config: Optional[Dict[Any, Any]] = None) -> None:
-        super().__init__(config)
-
-        self.base_ctrl = PositionPID(delta_t=1 / self.config["policy_frequency"])
-        self.angle_constraint = self.config.get("angle_constraint", True)
-
-    def one_step(self, action: Action) -> Tuple[Observation, float, bool, dict]:
-        obs, obs_info = self.observation_type.observe()
-        base_act = self.base_ctrl.act(obs_info)
-
-        action[0] = base_act[0]
-        action[1] = base_act[1]
-        action[2] = base_act[2]
-        # action[3] = action[3]
-
-        action = np.clip(action, -1, 1)
-        return super().one_step(action)
-
-    def reset(self) -> Observation:
-        self.base_ctrl.reset()
-        return super().reset()
-
-    def _is_terminal(self, obs_info: dict) -> bool:
-        """if episode terminate
-        - time: episode duration finished
-
-        Returns:
-            bool: [episode terminal or not]
-        """
-        time = False
-        if self.config["duration"] is not None:
-            time = self.steps >= int(self.config["duration"]) - 1
-
-        success = False
-
-        fail = False
-        if obs_info["obs_dict"]["position"][2] <= -60.0:
-            fail = True
-
-        if obs_info["obs_dict"]["position"][2] >= -1:
-            fail = True
-
-        if self.angle_constraint:
-            row = obs_info["obs_dict"]["angle"][0]
-            if (row > np.pi - 1) or (row < -np.pi + 1):
-                fail = True
-
-            pitch = obs_info["obs_dict"]["angle"][1]
-            if (pitch > np.pi - 1) or (pitch < -np.pi + 1):
-                fail = True
-
-        return time or success or fail
 
 
 if __name__ == "__main__":
@@ -328,7 +285,7 @@ if __name__ == "__main__":
     if auto_start_simulation:
         close_simulation()
 
-    ENV = MultiTaskPIDEnv  # MultiTaskEnv
+    ENV = MultiTaskEnv  # MultiTaskEnv, MultiTaskPIDEnv
     env_kwargs = {
         "DBG": True,
         "simulation": {
