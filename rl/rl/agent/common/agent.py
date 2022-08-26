@@ -1,10 +1,17 @@
+from multiprocessing.sharedctypes import Value
 import gym
 import torch
 import numpy as np
 import wandb
 from rltorch.memory import MultiStepMemory
 from agent.common.replay_buffer import MyMultiStepMemory
-from agent.common.util import np2ts, ts2np, check_action
+from agent.common.util import (
+    assert_shape,
+    np2ts,
+    ts2np,
+    check_output_action,
+    check_dim,
+)
 import warnings
 
 warnings.simplefilter("once", UserWarning)
@@ -163,9 +170,9 @@ class MultiTaskAgent(BasicAgent):
         min_n_experience: int = 1024,
         updates_per_step: int = 1,
         render: bool = False,
-        log_interval=10,
+        log_interval=3,
         eval=True,
-        eval_interval=50,
+        eval_interval=1e2,
         seed=0,
         **kwargs,
     ):
@@ -188,6 +195,7 @@ class MultiTaskAgent(BasicAgent):
         self.learn_steps = 0
         self.episodes = 0
 
+        self.eval = eval
         self.eval_interval = eval_interval
 
         if self.env.max_episode_steps is not None:
@@ -212,15 +220,13 @@ class MultiTaskAgent(BasicAgent):
             self.gamma,
             self.multi_step,
         )
-        self.obs_info = {}
 
     def train_episode(self):
         episode_reward = 0
         self.episodes += 1
         episode_steps = 0
         done = False
-        observation, info = self.env.reset()
-        feature, self.obs_info = info["features"], info
+        observation, feature = self.reset_env()
 
         while not done:
             if self.render:
@@ -231,7 +237,7 @@ class MultiTaskAgent(BasicAgent):
 
             action = self.act(observation)
             next_observation, reward, done, info = self.env.step(action)
-            next_feature, self.obs_info = info["features"], info
+            next_feature = info["features"]
             self.steps += 1
             episode_steps += 1
             episode_reward += reward
@@ -257,8 +263,17 @@ class MultiTaskAgent(BasicAgent):
         if self.episodes % self.log_interval == 0:
             wandb.log({"reward/train": episode_reward})
 
-        if self.steps % self.eval_interval == 0:
+        if self.eval and (self.episodes % self.eval_interval == 0):
             self.evaluate()
+
+    def reset_env(self):
+        try:
+            observation, info = self.env.reset()
+            feature = info["features"]
+        except ValueError:
+            observation = self.env.reset()
+            feature = np.zeros(self.feature_dim)
+        return observation, feature
 
     def evaluate(self):
         episodes = 3
@@ -266,7 +281,7 @@ class MultiTaskAgent(BasicAgent):
         returns = np.zeros((episodes,), dtype=np.float32)
 
         for i in range(episodes):
-            observation, info = self.env.reset()
+            observation, info = self.reset_env()
             episode_reward = 0.0
             done = False
             while not done:
@@ -284,19 +299,22 @@ class MultiTaskAgent(BasicAgent):
         if self.start_steps > self.steps:
             action = self.env.action_space.sample()
         else:
-            action = self.get_action(obs, mode)
+            with torch.no_grad():
+                action = self.get_action(obs, mode)
+
+        action = check_output_action(action, self.action_dim)
         return action
 
     def get_action(self, obs, mode):
-        obs_ts, w_ts = np2ts(obs), np2ts(self.w)
+        obs, w = np2ts(obs), np2ts(self.w)
+        obs = check_dim(obs, self.observation_dim)
 
         if mode == "explore":
-            act_ts = self.explore(obs_ts, w_ts)
+            act_ts = self.explore(obs, w)
         elif mode == "exploit":
-            act_ts = self.exploit(obs_ts, w_ts)
+            act_ts = self.exploit(obs, w)
 
         act = ts2np(act_ts)
-        act = check_action(act, self.action_dim)
         return act
 
     def explore(self, obs, w):
