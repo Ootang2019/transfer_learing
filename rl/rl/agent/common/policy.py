@@ -109,9 +109,9 @@ class GaussianPolicy(BaseNetwork):
 
         # calculate entropies
         log_probs = normals.log_prob(xs) - torch.log(1 - actions.pow(2) + self.eps)
-        logp = log_probs.sum(dim=1, keepdim=True)
+        entropy = -log_probs.sum(dim=1, keepdim=True)
 
-        return actions, logp, torch.tanh(means)
+        return actions, entropy, torch.tanh(means)
 
     def sample(self, obs):
         return self.forward(obs)
@@ -144,13 +144,13 @@ class GMMPolicy(BaseNetwork):
             reparameterize=reparameterize,
         )
 
-    def forward(self, obs, n_particles=1):
-
+    def forward(self, obs):
         act, logp, mean = self.model(obs)
         act = torch.tanh(act)
         mean = torch.tanh(mean)
         logp -= self.squash_correction(act)
-        return act, logp[:, None], mean
+        entropy = -logp[:, None].sum(dim=1, keepdim=True)
+        return act, entropy, mean
 
     def squash_correction(self, inp):
         return torch.sum(torch.log(1 - torch.tanh(inp) ** 2 + EPS), 1)

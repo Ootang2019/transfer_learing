@@ -42,13 +42,13 @@ class MultiTaskEnv(BaseEnv):
         )
         config["target"].update(
             {
-                "type": "FixedGoal",
+                "type": "RandomGoal",
                 "target_name_space": "goal_",
             }
         )
         config.update(
             {
-                "duration": 1500,
+                "duration": 1500,  # [steps]
                 "simulation_frequency": 50,  # [hz]
                 "policy_frequency": 25,  # [hz]
                 "success_threshhold": 1,  # [meters]
@@ -66,7 +66,10 @@ class MultiTaskEnv(BaseEnv):
                         "pos_ubnd_cost": np.array([0.1, 0.1, 0.1]),  # x,y,z
                         "pos_lbnd_cost": np.array([0.1, 0.1, 0.1]),  # x,y,z
                     },
-                    "success": {"pos": np.array([10.0, 10.0, 10.0])},  # x,y,z
+                    "success": {
+                        "pos": np.array([10.0, 10.0, 10.0]),
+                        "fail": np.array([-10.0]),
+                    },  # x,y,z
                 },
                 "angle_reset": True,  # reset env if roll and pitch too large
             }
@@ -112,7 +115,7 @@ class MultiTaskEnv(BaseEnv):
         obs, obs_info = self.observation_type.observe()
         self.obs, self.obs_info = obs, obs_info
         reward, reward_info = self._reward(obs.copy(), action, obs_info)
-        terminal = self._is_terminal(obs_info)
+        terminal, terminal_info = self._is_terminal(obs_info)
 
         info = {
             "step": self.steps,
@@ -124,6 +127,7 @@ class MultiTaskEnv(BaseEnv):
             "features": reward_info["features"],
             "reward_info": reward_info,
             "terminal": terminal,
+            "terminal_info": terminal_info,
         }
 
         self._update_goal_and_env(obs_info)
@@ -149,7 +153,6 @@ class MultiTaskEnv(BaseEnv):
         """
         features = self.calc_features(obs, obs_info)
         reward = np.dot(self.w, features)
-        # reward = np.clip(reward, -1, 1)
         reward_info = {
             "reward": reward,
             "features": features,
@@ -180,27 +183,31 @@ class MultiTaskEnv(BaseEnv):
         feature_weights = np.concatenate(extract_nparray_from_dict(tasks["tracking"]))
         constr_weights = np.concatenate(extract_nparray_from_dict(tasks["constraint"]))
         success_weights = np.concatenate(extract_nparray_from_dict(tasks["success"]))
+
         return np.concatenate([feature_weights, constr_weights, success_weights])
 
     def calc_features(self, obs, obs_info):
-        tracking_features = -np.abs(obs[0 : self.tracking_feature_len])
-        constraint_features = self.calc_constr_features(
-            obs_info["obs_dict"]["position"], obs_info["constr_dict"]
-        )
-        success_features = self.calc_success_features(
-            obs_info["obs_dict"]["position"], obs_info["goal_dict"]["position"]
-        )
+        tracking_features = self.calc_track_features(obs)
+        constraint_features = self.calc_constr_features(obs_info)
+        success_features = self.calc_success_features(obs_info)
         features = np.concatenate(
             [tracking_features, constraint_features, success_features]
         )
         return features
 
-    def calc_constr_features(self, pos: np.array, constr_dict: dict) -> np.array:
+    def calc_track_features(self, obs: np.array) -> np.array:
+        return -np.abs(obs[0 : self.tracking_feature_len])
+
+    def calc_constr_features(self, obs_info: dict) -> np.array:
+        pos = obs_info["obs_dict"]["position"]
+        constr_dict = obs_info["constr_dict"]
+
         act = np.array([self.action_type.action_rew()])
         pos_bnd = self.calc_dist_to_pos_bnd(pos, constr_dict)
         return np.concatenate([act, pos_bnd])
 
     def calc_dist_to_pos_bnd(self, pos: np.array, constr_dict: dict) -> np.array:
+        """closer to the bnd the higher the cost"""
         ubnd_pos = constr_dict["upper_boundary_position"]
         lbnd_pos = constr_dict["lower_boundary_position"]
 
@@ -208,20 +215,26 @@ class MultiTaskEnv(BaseEnv):
         lbnd_cost = -np.exp(-(pos - lbnd_pos))
         return np.clip(np.concatenate([ubnd_cost, lbnd_cost]), -10, 0)
 
-    def calc_success_features(self, pos: np.array, goal_pos: np.array) -> np.array:
+    def calc_success_features(self, obs_info: dict) -> np.array:
+        pos, goal_pos = (
+            obs_info["obs_dict"]["position"],
+            obs_info["goal_dict"]["position"],
+        )
         pos_success = self.position_task_successs(pos, goal_pos)
-        return np.concatenate([pos_success])
+
+        _, info = self._is_terminal(obs_info)
+        fail = np.array([info["fail"]]).astype(float)
+        return np.concatenate([pos_success, fail])
 
     def position_task_successs(self, pos: np.array, goal_pos: np.array) -> np.array:
         """task success if distance to goal is less than sucess_threshhold
 
         Args:
             pos ([np.array]): [position of machine]
-            goal_pos ([np.array]): [position of planar goal]
-            k (float): scaler for success
+            goal_pos ([np.array]): [position of goal]
 
         Returns:
-            [float]: [1.0 if success, otherwise 0]
+            [np.array]: [1.0 if success, otherwise 0.0]
         """
         ref_pos = np.abs(pos[0:3] - goal_pos[0:3])
         return np.array(ref_pos <= self.config["success_threshhold"]).astype(float)
@@ -255,7 +268,7 @@ class MultiTaskEnv(BaseEnv):
             if (pitch > np.pi - 1) or (pitch < -np.pi + 1):
                 fail = True
 
-        return time or success or fail
+        return time or success or fail, {"time": time, "success": success, "fail": fail}
 
     def _sample_new_goal(self):
         if self.config["target"]["type"] == "MultiGoal" and self.config["target"].get(

@@ -115,6 +115,25 @@ class GaussianMixture(torch.nn.Module):
         if not self._reparameterize:
             x_t = x_t.detach()
 
+        log_p_x_t = self.calc_log_p_x(log_ws_t, xz_mus_t, xz_log_sigs_t, x_t)
+
+        reg_loss_t = 0
+        reg_loss_t += self._reg * 0.5 * torch.mean(xz_log_sigs_t**2)
+        reg_loss_t += self._reg * 0.5 * torch.mean(xz_mus_t**2)
+
+        self._log_p_x_t = log_p_x_t
+        self._reg_loss_t = reg_loss_t
+        self._xz_mu_t = xz_mu_t
+        self._x_t = x_t
+
+        self._log_ws_t = log_ws_t
+        self._mus_t = xz_mus_t
+        self._mu_t = xz_mu_t
+        self._log_sigs_t = xz_log_sigs_t
+
+        return x_t, log_p_x_t, xz_mu_t
+
+    def calc_log_p_x(self, log_ws_t, xz_mus_t, xz_log_sigs_t, x_t):
         # log p(x|z_k) = log N(x | mu_k, sig_k)
         log_p_xz_t = self._create_log_gaussian(
             xz_mus_t, xz_log_sigs_t, x_t[:, None, :]
@@ -123,35 +142,28 @@ class GaussianMixture(torch.nn.Module):
         # log p(x) = log sum_k p(z_k)p(x|z_k)
         log_p_x_t = torch.logsumexp(log_p_xz_t + log_ws_t, axis=1)
         log_p_x_t = log_p_x_t - torch.logsumexp(log_ws_t, axis=1)  # N
+        return log_p_x_t
 
+    def calc_log_p_x_mono(self, log_ws_t, xz_mus_t, xz_log_sigs_t, x_t):
         # log p(x|z_k)
         log_p_xz_mono_t = self._create_log_mono_gaussian(
             xz_mus_t, xz_log_sigs_t, x_t[:, None, :]
         )  # N x K
 
-        # log test p(x)
+        # log mono p(x)
         log_ws_mono_t = log_ws_t[..., None]
         log_p_x_mono_t = torch.logsumexp(log_p_xz_mono_t + log_ws_mono_t, axis=1)
         log_p_x_mono_t = log_p_x_mono_t - torch.logsumexp(log_ws_mono_t, axis=1)  # N
-
-        reg_loss_t = 0
-        reg_loss_t += self._reg * 0.5 * torch.mean(xz_log_sigs_t**2)
-        reg_loss_t += self._reg * 0.5 * torch.mean(xz_mus_t**2)
-
-        self._log_p_x_t = log_p_x_t
-        self._log_p_x_mono_t = log_p_x_mono_t
-        self._reg_loss_t = reg_loss_t
-        self._x_t = x_t
-
-        self._log_ws_t = log_ws_t
-        self._mus_t = xz_mus_t
-        self._log_sigs_t = xz_log_sigs_t
-
-        return x_t, log_p_x_t, xz_mu_t
+        return log_p_x_mono_t
 
     @property
     def log_p_x_mono_t(self):
-        return self._log_p_x_mono_t
+        log_ws_t = self._log_ws_t
+        xz_mus_t = self._mu_t
+        xz_log_sigs_t = self._log_sigs_t
+        x_t = self._x_t
+        log_p_x_mono_t = self.calc_log_p_x_mono(log_ws_t, xz_mus_t, xz_log_sigs_t, x_t)
+        return log_p_x_mono_t
 
     @property
     def log_p_t(self):
@@ -168,6 +180,10 @@ class GaussianMixture(torch.nn.Module):
     @property
     def mus_t(self):
         return self._mus_t
+
+    @property
+    def mu_t(self):
+        return self._mu_t
 
     @property
     def log_sigs_t(self):

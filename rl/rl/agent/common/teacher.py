@@ -63,7 +63,6 @@ class PIDController:
         if not self.i_from_sensor:
             # sample uniform random [-1,1]
             err_i = torch.rand(err.shape).to(device) * 2 - 1
-            err_i = err_i
         else:
             err_i = err_i_sensor
 
@@ -83,22 +82,20 @@ class PIDController:
 
 class AttitudePID:
     CONFIG = {
-        "ctrl_config": {
-            "roll": {
-                "pid_param": np.array([1.0, 0.7, 0.2]),
-                "gain": 0.3,
-                "d_from_sensor": True,
-            },
-            "pitch": {
-                "pid_param": np.array([1.0, 0.7, 0.2]),
-                "gain": 0.3,
-                "d_from_sensor": True,
-            },
-            "yaw": {
-                "pid_param": np.array([1.0, 0.5, 0.1]),
-                "gain": 0.2,
-                "d_from_sensor": True,
-            },
+        "roll": {
+            "pid_param": np.array([1.0, 0.5, 0.1]),
+            "gain": 1.0,
+            "d_from_sensor": False,
+        },
+        "pitch": {
+            "pid_param": np.array([1.0, 0.5, 0.1]),
+            "gain": 1.0,
+            "d_from_sensor": False,
+        },
+        "yaw": {
+            "pid_param": np.array([1.0, 0.1, 0.4]),
+            "gain": 0.1,
+            "d_from_sensor": False,
         },
     }
 
@@ -113,21 +110,21 @@ class AttitudePID:
         self.delta_t = delta_t
         self.ctrl_roll = PIDController(
             delta_t=delta_t,
-            **self.CONFIG["ctrl_config"]["roll"],
+            **self.CONFIG["roll"],
         )
         self.ctrl_pitch = PIDController(
             delta_t=delta_t,
-            **self.CONFIG["ctrl_config"]["pitch"],
+            **self.CONFIG["pitch"],
         )
         self.ctrl_yaw = PIDController(
             delta_t=delta_t,
-            **self.CONFIG["ctrl_config"]["yaw"],
+            **self.CONFIG["yaw"],
         )
 
-    def act(self, obs):
-        tobs = self.unpack_teacher_obs_as_tensor(obs)
+    def act(self, obs: torch.Tensor):
+        tobs = self.unpack_teacher_obs(obs)
         action = self.get_action(*tobs).squeeze()
-        return ts2np(action)
+        return action
 
     def get_action(self, ang_vel, ang_diff):
         """
@@ -135,35 +132,26 @@ class AttitudePID:
         """
         roll_ctrl = self.ctrl_roll.action(
             err=-ang_diff[:, 0], err_d_sensor=-ang_vel[:, 0]
-        )
+        ).unsqueeze(1)
         pitch_ctrl = self.ctrl_pitch.action(
             err=-ang_diff[:, 1], err_d_sensor=-ang_vel[:, 1]
-        )
-        yaw_ctrl = self.ctrl_yaw.action(err=ang_diff[:, 2], err_d_sensor=ang_vel[:, 2])
+        ).unsqueeze(1)
+        yaw_ctrl = self.ctrl_yaw.action(
+            err=ang_diff[:, 2], err_d_sensor=ang_vel[:, 2]
+        ).unsqueeze(1)
+        z_ctrl = torch.zeros_like(roll_ctrl)
 
-        ctrl = torch.cat([roll_ctrl, pitch_ctrl, yaw_ctrl, torch.zeros([1, 1])])
+        ctrl = torch.cat([roll_ctrl, pitch_ctrl, yaw_ctrl, z_ctrl])
         action = torch.clip(ctrl, -1, 1)
+        return action
 
-        return ts2np(action)
-
-    def unpack_teacher_obs(self, obs: np.ndarray):
+    def unpack_teacher_obs(self, obs: torch.Tensor):
+        if obs.dim() == 1:
+            obs = obs[None, :]
         return [
-            np.array(obs[self.OBS_IDX[i]]) * self.OBS_SCALE[i]
-            for i in range(len(self.OBS_IDX))
-        ]
-
-    def unpack_teacher_obs_as_tensor(self, obs: np.ndarray):
-        tobs = self.unpack_teacher_obs(obs)
-        for i in range(len(tobs)):
-            tobs[i] = np2ts(tobs[i].reshape([1, -1]))
-        return tobs
-
-    def __call__(self, obs: torch.Tensor):
-        tobs = [
             obs[:, self.OBS_IDX[i]] * self.OBS_SCALE[i]
             for i in range(len(self.OBS_IDX))
         ]
-        return self.get_action(*tobs), None, None
 
     def clear_ctrl_param(self):
         self.ctrl_roll.clear()
@@ -173,40 +161,44 @@ class AttitudePID:
     def reset(self):
         self.clear_ctrl_param()
 
+    def __call__(self, obs: torch.Tensor):
+        tobs = self.unpack_teacher_obs(obs)
+        act = self.get_action(*tobs)
+        logp = 0
+        return act, logp, act
+
 
 class PositionPID(AttitudePID):
     CONFIG = {
-        "ctrl_config": {
-            "roll": {
-                "pid_param": np.array([1.0, 0.5, 0.1]),
-                "gain": 1.0,
-                "d_from_sensor": False,
-            },
-            "pitch": {
-                "pid_param": np.array([1.0, 0.5, 0.1]),
-                "gain": 1.0,
-                "d_from_sensor": False,
-            },
-            "yaw": {
-                "pid_param": np.array([1.0, 0.1, 0.4]),
-                "gain": 0.1,
-                "d_from_sensor": False,
-            },
-            "x": {
-                "pid_param": np.array([1.0, 0.2, 0.5]),
-                "gain": 0.2,
-                "d_from_sensor": False,
-            },
-            "y": {
-                "pid_param": np.array([1.0, 0.2, 0.5]),
-                "gain": 0.2,
-                "d_from_sensor": False,
-            },
-            "z": {
-                "pid_param": np.array([1.0, 0.4, 3]),
-                "gain": 1.5,
-                "d_from_sensor": False,
-            },
+        "roll": {
+            "pid_param": np.array([1.0, 0.5, 0.1]),
+            "gain": 1.0,
+            "d_from_sensor": False,
+        },
+        "pitch": {
+            "pid_param": np.array([1.0, 0.5, 0.1]),
+            "gain": 1.0,
+            "d_from_sensor": False,
+        },
+        "yaw": {
+            "pid_param": np.array([1.0, 0.1, 0.4]),
+            "gain": 0.1,
+            "d_from_sensor": False,
+        },
+        "x": {
+            "pid_param": np.array([1.0, 0.2, 0.5]),
+            "gain": 0.2,
+            "d_from_sensor": False,
+        },
+        "y": {
+            "pid_param": np.array([1.0, 0.2, 0.5]),
+            "gain": 0.2,
+            "d_from_sensor": False,
+        },
+        "z": {
+            "pid_param": np.array([1.0, 0.4, 3]),
+            "gain": 1.5,
+            "d_from_sensor": False,
         },
     }
 
@@ -221,21 +213,23 @@ class PositionPID(AttitudePID):
 
     def __init__(self, delta_t=1 / 50) -> None:
         super().__init__(delta_t)
-
         self.ctrl_x = PIDController(
             delta_t=delta_t,
-            **self.CONFIG["ctrl_config"]["x"],
+            **self.CONFIG["x"],
         )
         self.ctrl_y = PIDController(
             delta_t=delta_t,
-            **self.CONFIG["ctrl_config"]["y"],
+            **self.CONFIG["y"],
         )
         self.ctrl_z = PIDController(
             delta_t=delta_t,
-            **self.CONFIG["ctrl_config"]["z"],
+            **self.CONFIG["z"],
         )
 
     def get_action(self, ang, ang_vel, ang_diff, pos_diff):
+        """
+        generate base control signal
+        """
         x_ctrl = self.ctrl_x.action(err=pos_diff[:, 0])
         y_ctrl = self.ctrl_y.action(err=pos_diff[:, 1])
         z_ctrl = self.ctrl_z.action(err=pos_diff[:, 2]).unsqueeze(1)

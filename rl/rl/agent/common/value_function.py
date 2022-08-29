@@ -72,8 +72,8 @@ class SFNetwork(BaseNetwork):
         self.activation = activation()
 
     def forward(self, observations, actions):
-        observations, _ = check_dim(observations)
-        actions, _ = check_dim(actions)
+        observations = check_dim(observations, self.observation_dim)
+        actions = check_dim(actions, self.action_dim)
 
         x = torch.cat([observations, actions], dim=1)
         x = self.activation(self.ln1(self.fc1(x)))

@@ -65,8 +65,12 @@ def get_sa_pairs_(
 
 def assert_shape(tensor, expected_shape):
     tensor_shape = tensor.shape
-    assert len(tensor_shape) == len(expected_shape)
-    assert all([a == b for a, b in zip(tensor_shape, expected_shape)][1:])
+    assert len(tensor_shape) == len(
+        expected_shape
+    ), f"expect len a {len(tensor_shape)}, b {len(expected_shape)}"
+    assert all(
+        [a == b for a, b in zip(tensor_shape, expected_shape)][1:]
+    ), f"expect shape a {tensor_shape}, b {expected_shape}"
 
 
 def soft_update(target, source, tau):
@@ -83,38 +87,43 @@ def grad_false(network):
         param.requires_grad = False
 
 
-def check_dim(obj):
+def check_samples(obj):
     if obj.ndim > 1:
         n_samples = obj.shape[0]
     else:
-        obj = obj[None, :]
         n_samples = 1
-    return obj, n_samples
+    return n_samples
 
 
-def check_action(action, action_dim):
+def check_dim(obj, obj_dim):
+    if isinstance(obj, np.ndarray):
+        obj = np2ts(obj)
+
+    n_samples = check_samples(obj)
+    obj = obj.reshape(n_samples, obj_dim)
+
+    assert_shape(obj, [None, obj_dim])
+    return obj
+
+
+def check_output_action(action, action_dim):
     if isinstance(action, torch.Tensor):
         action = ts2np(action)
 
-    action = action.reshape(
-        -1,
-    )
+    action = action.reshape(action_dim)
 
     assert isinstance(action, np.ndarray)
-    assert action.shape == (
-        action_dim,
-    ), f"action shape {action.shape} should be {(action_dim,)}"
-
+    assert action.shape == (action_dim,), f"shape a {action.shape}, b {(action_dim,)}"
     return action
 
 
-def np2ts(obj):
+def np2ts(obj: np.ndarray) -> torch.Tensor:
     if isinstance(obj, np.ndarray) or isinstance(obj, float):
         obj = torch.tensor(obj, dtype=torch.float32).to(device)
     return obj
 
 
-def ts2np(obj):
+def ts2np(obj: torch.Tensor) -> np.ndarray:
     return obj.cpu().detach().numpy()
 
 

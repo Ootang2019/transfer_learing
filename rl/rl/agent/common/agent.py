@@ -170,9 +170,10 @@ class MultiTaskAgent(BasicAgent):
         min_n_experience: int = 1024,
         updates_per_step: int = 1,
         render: bool = False,
-        log_interval=3,
+        log_interval=10,
         eval=True,
         eval_interval=1e2,
+        evaluate_episodes=3,
         seed=0,
         **kwargs,
     ):
@@ -197,6 +198,7 @@ class MultiTaskAgent(BasicAgent):
 
         self.eval = eval
         self.eval_interval = eval_interval
+        self.evaluate_episodes = evaluate_episodes
 
         if self.env.max_episode_steps is not None:
             self.max_episode_steps = self.env.max_episode_steps
@@ -276,7 +278,10 @@ class MultiTaskAgent(BasicAgent):
         return observation, feature
 
     def evaluate(self):
-        episodes = 3
+        episodes = self.evaluate_episodes
+        if episodes == 0:
+            return
+
         mode = "exploit"
         returns = np.zeros((episodes,), dtype=np.float32)
 
@@ -299,8 +304,7 @@ class MultiTaskAgent(BasicAgent):
         if self.start_steps > self.steps:
             action = self.env.action_space.sample()
         else:
-            with torch.no_grad():
-                action = self.get_action(obs, mode)
+            action = self.get_action(obs, mode)
 
         action = check_output_action(action, self.action_dim)
         return action
@@ -309,18 +313,19 @@ class MultiTaskAgent(BasicAgent):
         obs, w = np2ts(obs), np2ts(self.w)
         obs = check_dim(obs, self.observation_dim)
 
-        if mode == "explore":
-            act_ts = self.explore(obs, w)
-        elif mode == "exploit":
-            act_ts = self.exploit(obs, w)
+        with torch.no_grad():
+            if mode == "explore":
+                act_ts = self.explore(obs, w)
+            elif mode == "exploit":
+                act_ts = self.exploit(obs, w)
 
         act = ts2np(act_ts)
         return act
 
-    def explore(self, obs, w):
+    def explore(self):
         raise NotImplementedError
 
-    def exploit(self, obs, w):
+    def exploit(self):
         raise NotImplementedError
 
     def change_task(self):

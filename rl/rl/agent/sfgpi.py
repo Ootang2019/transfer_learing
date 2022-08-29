@@ -1,3 +1,5 @@
+from email import policy
+from random import sample
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -11,11 +13,14 @@ from agent.common.agent import MultiTaskAgent
 from agent.common.policy import GaussianPolicy, GMMPolicy
 from agent.common.util import (
     generate_grid_schedule,
+    get_sa_pairs,
     grad_false,
     hard_update,
     soft_update,
     ts2np,
+    np2ts,
     update_params,
+    assert_shape,
 )
 from agent.common.value_function import TwinnedSFNetwork
 
@@ -42,29 +47,33 @@ class SFGPIAgent(MultiTaskAgent):
             env="InvertedDoublePendulum-v4",
             env_kwargs={},
             total_timesteps=int(1e6),
-            reward_scale=10,
+            reward_scale=1,
             tau=5e-3,
             alpha=0.2,
             lr=1e-4,
             policy_lr=5e-4,
             alpha_lr=3e-4,
             gamma=0.99,
+            n_particles=32,
+            compute_target_by_sfv=True,
+            normalize_critic=True,
             policy_regularization=1e-3,
-            n_gauss=2,
+            n_gauss=4,
             multi_step=1,
             updates_per_step=1,
             mini_batch_size=128,
-            min_n_experience=int(1024),
+            min_n_experience=int(2048),
             replay_buffer_size=1e6,
             td_target_update_interval=1,
             grad_clip=None,
             render=False,
             log_interval=10,
-            entropy_tuning=False,
+            entropy_tuning=True,
             alpha_bnd=10,
             eval=True,
             eval_interval=100,
             seed=0,
+            policy_class="GaussianMixture",
             net_kwargs={"value_sizes": [64, 64], "policy_sizes": [32, 32]},
             task_schedule=None,
             task_manual=None,
@@ -84,7 +93,11 @@ class SFGPIAgent(MultiTaskAgent):
         self.gamma = config.get("gamma", 0.99)
         self.tau = config.get("tau", 5e-3)
         self.td_target_update_interval = int(config.get("td_target_update_interval", 1))
+        self.n_particles = config.get("n_particles", 20)
+        self.calc_target_by_sfv = config.get("compute_target_by_sfv", True)
+        self.normalize_critic = config.get("normalize_critic", True)
 
+        self.policy_class = config.get("policy_class", "GaussianMixture")
         self.pol_lr = config.get("policy_lr", 1e-3)
         self.pol_reg = config.get("policy_regularization", 1e-3)
         self.n_gauss = config.get("n_gauss", 5)
@@ -169,9 +182,8 @@ class SFGPIAgent(MultiTaskAgent):
                 act, _, _ = self.pols[i](obs)
             if mode == "exploit":
                 _, _, act = self.pols[i](obs)
-            sf0, sf1 = self.sfs[i](obs, act)
-            sf = torch.min(sf0, sf1)
-            q = torch.matmul(sf, w)
+
+            q = self.calc_q_from_sf(obs, act, self.sfs[i], w)
 
             acts.append(act)
             qs.append(q)
@@ -180,41 +192,44 @@ class SFGPIAgent(MultiTaskAgent):
     def gpi(self, acts, qs):
         qs = torch.tensor(qs)
         pol_idx = torch.argmax(qs)
-        act = acts[pol_idx].squeeze(1)
+        act = acts[pol_idx].squeeze()
         return act
 
     def learn(self):
         self.learn_steps += 1
+        i = self.policy_idx
 
         if self.learn_steps % self.td_target_update_interval == 0:
-            for i in range(len(self.sfs)):
-                soft_update(self.sf_tars[i], self.sfs[i], self.tau)
+            soft_update(self.sf_tars[i], self.sfs[i], self.tau)
 
         batch = self.replay_buffer.sample(self.mini_batch_size)
 
-        i = self.policy_idx
         sf_optim, sf, sf_tar = self.sf_optims[i], self.sfs[i], self.sf_tars[i]
         pol_optim, pol = self.pol_optims[i], self.pols[i]
 
         sf_loss, mean_sf, target_sf = self.calc_sf_loss(batch, sf, sf_tar, pol)
-        pol_loss, logp = self.calc_pol_loss(batch, sf_tar, pol)
+        pol_loss, entropy = self.calc_pol_loss(batch, sf_tar, pol)
 
         update_params(sf_optim[0], sf.SF0, sf_loss[0], self.grad_clip)
         update_params(sf_optim[1], sf.SF1, sf_loss[1], self.grad_clip)
         update_params(pol_optim, pol, pol_loss, self.grad_clip)
 
         if self.learn_steps % self.log_interval == 0:
-            sf_loss_var = self.get_sf_losses_var(sf_loss, self.nrec_sfloss)
+            # sf_loss_var = self.get_sf_losses_var(sf_loss, self.nrec_sfloss)
+            (obs, _, _, _, _, _) = batch
+            act, _, _ = pol(obs)
+            q = self.calc_q_from_sf(obs, act, sf_tar, self.w)
 
             metrics = {
                 "loss/SF0": sf_loss[0].detach().item(),
                 "loss/SF1": sf_loss[1].detach().item(),
                 "loss/policy": pol_loss.detach().item(),
-                "loss/sfloss_var": sf_loss_var,
+                # "loss/sfloss_var": sf_loss_var,
+                "state/q_hat": q.detach().mean().item(),
                 "state/mean_SF0": mean_sf[0],
                 "state/mean_SF1": mean_sf[1],
                 "state/target_sf": target_sf.detach().mean().item(),
-                "state/logp": logp.detach().mean().item(),
+                "state/entropy": entropy.detach().mean().item(),
                 "task/task_idx": self.task_idx,
                 "task/policy_idx": self.policy_idx,
             }
@@ -226,7 +241,7 @@ class SFGPIAgent(MultiTaskAgent):
             wandb.log(metrics)
 
         if self.entropy_tuning:
-            entropy_loss = self.calc_entropy_loss(logp)
+            entropy_loss = self.calc_entropy_loss(entropy)
             update_params(self.alpha_optimizer, None, entropy_loss)
             self.alpha = self.log_alpha.exp()
             self.alpha = torch.clip(self.alpha, -self.alpha_bnd, self.alpha_bnd)
@@ -242,61 +257,132 @@ class SFGPIAgent(MultiTaskAgent):
 
         cur_sf0, cur_sf1 = sf(observations, actions)
         cur_sf0, cur_sf1 = cur_sf0.squeeze(), cur_sf1.squeeze()
+        assert_shape(cur_sf0, [None, self.feature_dim])
 
-        target_sf, next_sfv = self.calc_target_sf(
-            next_observations, features, dones, sf_target, pol
-        )
+        if self.calc_target_by_sfv:
+            target_sf, next_sfv = self.calc_target_sfv(
+                next_observations, features, dones, sf_target, pol
+            )
+        else:
+            target_sf, next_sf = self.calc_target_sf(
+                next_observations, features, dones, sf_target, pol
+            )
+        assert_shape(target_sf, [None, self.feature_dim])
 
         mean_sf0 = cur_sf0.detach().mean().item()
         mean_sf1 = cur_sf1.detach().mean().item()
 
-        assert cur_sf0.shape == target_sf.shape
-
-        sf0_loss = F.mse_loss(cur_sf0, target_sf)
-        sf1_loss = F.mse_loss(cur_sf1, target_sf)
+        if self.normalize_critic:
+            # apply critic normalization trick,
+            # ref: Yang-Gao, Reinforcement Learning from Imperfect Demonstrations
+            _, sfv = self.calc_target_sfv(observations, features, dones, sf_target, pol)
+            grad_sf0 = torch.autograd.grad(
+                (cur_sf0 - sfv), sf.SF0.parameters(), grad_outputs=(cur_sf0 - target_sf)
+            )
+            grad_sf1 = torch.autograd.grad(
+                (cur_sf1 - sfv), sf.SF1.parameters(), grad_outputs=(cur_sf1 - target_sf)
+            )
+            # multiply weights and differentiate later so we can apply gradient
+            sf0_loss = self.calc_surrogate_loss(sf.SF0, grad_sf0)
+            sf1_loss = self.calc_surrogate_loss(sf.SF1, grad_sf1)
+        else:
+            sf0_loss = F.mse_loss(cur_sf0, target_sf)
+            sf1_loss = F.mse_loss(cur_sf1, target_sf)
 
         return (sf0_loss, sf1_loss), (mean_sf0, mean_sf1), target_sf
 
     def calc_pol_loss(self, batch, sf_tar, pol):
-        (observations, _, _, _, _, _) = batch
-        act, logp, _ = pol(observations)
+        (obs, _, _, _, _, _) = batch
 
-        sf0, sf1 = sf_tar(observations, act)
+        act, entropy, _ = pol(obs)
+        q = self.calc_q_from_sf(obs, act, sf_tar, self.w)
 
-        q_hat0 = torch.matmul(sf0, self.w)
-        q_hat1 = torch.matmul(sf1, self.w)
+        if self.normalize_critic:
+            with torch.no_grad():
+                v = self.calc_v_from_sf(obs, sf_tar, self.w)
+            q -= v
 
-        q_hat = torch.min(q_hat0, q_hat1)
-        q_hat *= self.reward_scale
+        loss = torch.mean(-self.alpha * entropy - q) + self.reg_loss(pol)
+        return loss, entropy
 
-        assert logp.shape == q_hat.shape
+    def calc_target_sf(self, next_obs, features, dones, sf_target, pol):
+        with torch.no_grad():
+            _, _, next_act = pol(next_obs)
 
-        reg_loss = self.reg_loss(pol)
-        loss = torch.mean(self.alpha * logp - q_hat) + reg_loss
-        return loss, logp
+            next_sf0, next_sf1 = sf_target(next_obs, next_act)
+            next_sf = torch.min(next_sf0, next_sf1)
+            assert_shape(next_sf, [None, self.feature_dim])
+            assert_shape(features, [None, self.feature_dim])
+
+            target_sf = features + (1 - dones) * self.gamma * next_sf
+            assert_shape(target_sf, [None, self.feature_dim])
+
+        return target_sf, next_sf
+
+    def calc_target_sfv(self, next_obs, features, dones, sf_target, pol):
+        with torch.no_grad():
+            next_sf = self.calc_sf_value_by_random_actions(next_obs, sf_target)
+            next_sf = next_sf.view(-1, self.n_particles, self.feature_dim)
+
+            next_sfv = torch.logsumexp(next_sf, 1)
+            next_sfv -= np.log(self.n_particles)
+            next_sfv += self.action_dim * np.log(2)
+            assert_shape(next_sfv, [None, self.feature_dim])
+
+            target_sf = (features + (1 - dones) * self.gamma * next_sfv).squeeze(1)
+
+        return target_sf, next_sfv
+
+    def calc_surrogate_loss(self, net, gradient):
+        sur_loss = torch.sum(
+            torch.stack(
+                [torch.sum(w * g.detach()) for w, g in zip(net.parameters(), gradient)],
+                dim=0,
+            )
+        )
+        assert sur_loss.requires_grad == True
+        return sur_loss
+
+    def calc_q_from_sf(self, obs, act, sf, w):
+        sf0, sf1 = sf(obs, act)
+        assert_shape(sf0, [None, self.feature_dim])
+
+        sf = torch.min(sf0, sf1)
+        q = torch.matmul(sf, w)
+        q *= self.reward_scale
+        q = q[:, None]
+        assert_shape(q, [None, 1])
+        return q
+
+    def calc_v_from_sf(self, obs, sf_tar, w):
+        sf = self.calc_sf_value_by_random_actions(obs, sf_tar)
+        q = torch.matmul(sf, w)
+        q *= self.reward_scale
+        q = q.view(-1, self.n_particles)
+        assert_shape(q, [None, self.n_particles])
+
+        v = torch.logsumexp(q, 1)
+        v = v[:, None]
+        assert_shape(v, [None, 1])
+        return v
+
+    def calc_sf_value_by_random_actions(self, obs, sf_target):
+        sample_act = (
+            torch.distributions.uniform.Uniform(-1, 1)
+            .sample((self.n_particles, self.action_dim))
+            .to(device)
+        )
+        sample_obs, sample_act = get_sa_pairs(obs, sample_act)
+        sf0, sf1 = sf_target(sample_obs, sample_act)
+        sf = torch.min(sf0, sf1)
+        assert_shape(sf, [None, self.feature_dim])
+        return sf
 
     def calc_entropy_loss(self, entropy):
         entropy_loss = -torch.mean(
             self.log_alpha * (self.target_entropy - entropy).detach()
         )
         return entropy_loss
-
-    def calc_target_sf(self, next_observations, features, dones, sf_target, pol):
-        with torch.no_grad():
-            n_sample = next_observations.shape[0]
-            next_actions, _, _ = pol(next_observations)
-            next_sf0, next_sf1 = sf_target(next_observations, next_actions)
-
-            next_sf0 = next_sf0.view(n_sample, -1, self.feature_dim)
-            next_sf1 = next_sf1.view(n_sample, -1, self.feature_dim)
-
-            next_sf = torch.min(next_sf0, next_sf1)
-            next_sfv = torch.logsumexp(next_sf, 1)
-
-            assert features.shape == next_sfv.shape
-
-            target_sf = (features + (1 - dones) * self.gamma * next_sfv).squeeze(1)
-        return target_sf, next_sfv
 
     def reg_loss(self, pol):
         reg = getattr(pol, "reg_loss", None)
@@ -315,14 +401,13 @@ class SFGPIAgent(MultiTaskAgent):
         sf, sf_target, sf_optimizer = self.create_sf()
         policy, policy_optimizer = self.create_pol()
 
+        self.create_policy = True
+        self.policy_idx += 1
         self.sfs.append(sf)
         self.sf_tars.append(sf_target)
         self.sf_optims.append(sf_optimizer)
         self.pols.append(policy)
         self.pol_optims.append(policy_optimizer)
-
-        self.create_policy = True
-        self.policy_idx += 1
 
     def create_sf(self):
         sf = TwinnedSFNetwork(
@@ -350,13 +435,20 @@ class SFGPIAgent(MultiTaskAgent):
         return sf, sf_target, sf_optimizer
 
     def create_pol(self):
-        policy = GMMPolicy(
-            observation_dim=self.observation_dim,
-            action_dim=self.action_dim,
-            sizes=self.net_kwargs.get("policy_sizes", [64, 64]),
-            n_gauss=self.n_gauss,
-            reg=self.pol_reg,
-        ).to(device)
+        if self.policy_class == "GaussianMixture":
+            policy = GMMPolicy(
+                observation_dim=self.observation_dim,
+                action_dim=self.action_dim,
+                sizes=self.net_kwargs.get("policy_sizes", [64, 64]),
+                n_gauss=self.n_gauss,
+                reg=self.pol_reg,
+            ).to(device)
+        elif self.policy_class == "Gaussian":
+            policy = GaussianPolicy(
+                observation_dim=self.observation_dim,
+                action_dim=self.action_dim,
+                sizes=self.net_kwargs.get("policy_sizes", [64, 64]),
+            ).to(device)
         policy_optimizer = Adam(policy.parameters(), lr=self.pol_lr)
         return policy, policy_optimizer
 
@@ -398,11 +490,6 @@ class SFGPIAgent(MultiTaskAgent):
         if not self.create_policy:
             b = True
 
-        # for prev_w in self.prev_ws:
-        #     l = np.linalg.norm(w / self.feature_scale - prev_w / self.feature_scale)
-        #     if l > 1.0:
-        #         b = True
-
         return b
 
 
@@ -410,16 +497,62 @@ class TEACHER_SFGPI(SFGPIAgent):
     @classmethod
     def default_config(cls) -> dict:
         config = super().default_config()
+        config.update(
+            {
+                "train_tsf": True,
+                "n_teacher_episodes": 60,
+                "pretrain_sf_epochs": 1e4,
+            }
+        )
         return config
 
     def __init__(self, config: Optional[Dict[Any, Any]] = None) -> None:
         super().__init__(config)
 
-        self.n_teacher_episodes = 100  # run teacher n episodes
-        self.teacher_freq = 50  # can we tune PID based on policy freq?
-        self.teacher = PositionPID(delta_t=1 / self.teacher_freq)
-        self.teacher.reset()
+        self.n_teacher_episodes = config.get("n_teacher_episodes", 60)
+        self.pretrain_sf_epochs = config.get("pretrain_sf_epochs", 1e4)
+
+        self.teacher = PositionPID()
+        self.train_tsf = config.get("train_tsf", True)
         self.tsf, self.tsf_tar, self.tsf_optim = self.create_sf()
+
+        self.teacher.reset()
+
+    def run(self):
+        if self.train_tsf:
+            for i in range(self.n_teacher_episodes):
+                print(f"========= teacher sf episode {i} =========")
+                self.train_episode()
+            self.pretrain_student()
+        self.train_tsf = False
+        return super().run()
+
+    def pretrain_student(self):
+        hard_update(self.sfs[0], self.tsf)
+        hard_update(self.sf_tars[0], self.tsf_tar)
+        self.pretrain_pol(self.pretrain_sf_epochs)
+
+    def pretrain_pol(self, epoch=1e3):
+        print("start pretraing policy")
+        for i in range(int(epoch)):
+            batch = self.replay_buffer.sample(self.mini_batch_size)
+            pol_loss, _ = self.calc_pol_loss(batch, self.sf_tars[0], self.pols[0])
+            update_params(self.pol_optims[0], self.pols[0], pol_loss, self.grad_clip)
+
+            if i % self.log_interval == 0:
+                (obs, _, _, _, _, _) = batch
+                _, _, act = self.pols[0](obs)
+                _, _, tact = self.teacher.act(obs)
+
+                q = self.calc_q_from_sf(obs, act, self.sf_tars[0], self.w)
+                tq = self.calc_q_from_sf(obs, tact, self.sf_tars[0], self.w)
+
+                metrics = {
+                    "bc/loss": pol_loss,
+                    "bc/q_value": q.detach().mean().item(),
+                    "bc/tq_value": tq.detach().mean().item(),
+                }
+                wandb.log(metrics)
 
     def explore(self, obs, w):
         acts, qs = self.gpe(obs, w, "explore")
@@ -427,6 +560,14 @@ class TEACHER_SFGPI(SFGPIAgent):
         acts.append(tact)
         qs.append(tq)
         act = self.gpi(acts, qs)
+
+        if self.steps % self.log_interval == 0:
+            metrics = {
+                "state/teacher_q": tq,
+                "state/student_q": qs[0],
+            }
+            wandb.log(metrics)
+
         return act
 
     def exploit(self, obs, w):
@@ -439,55 +580,21 @@ class TEACHER_SFGPI(SFGPIAgent):
 
     def tgpe(self, obs, w):
         tact = self.teacher.act(obs)
-        tsf0, tsf1 = self.tsf(obs, tact)
-        tsf = torch.min(tsf0, tsf1)
-        tq = torch.matmul(tsf, w)
+        tq = self.calc_q_from_sf(obs, tact, self.tsf, w)
         return tact, tq
 
-    def run(self):
-        print("========= training teacher sf =========")
-        self.train_teacher_sf()
-        print("========= finish training teacher sf =========")
-        return super().run()
+    def act(self, obs, mode="explore"):
+        if self.train_tsf:
+            action = ts2np(self.teacher.act(np2ts(obs)))
+        else:
+            action = super().act(obs, mode)
+        return action
 
-    def train_teacher_sf(self):
-        """collect some data and train teacher sf"""
-        for _ in range(self.n_teacher_episodes):
-            episode_reward = 0
-            self.episodes += 1
-            episode_steps = 0
-            done = False
-            self.teacher.reset()
-            observation, info = self.env.reset()
-            feature = info["features"]
-
-            while not done:
-                action = self.teacher.act(observation)
-                next_observation, reward, done, info = self.env.step(action)
-                next_feature = info["features"]
-                self.steps += 1
-                episode_steps += 1
-                episode_reward += reward
-                masked_done = False if episode_steps >= self.max_episode_steps else done
-
-                self.replay_buffer.append(
-                    observation,
-                    feature,
-                    action,
-                    reward,
-                    next_observation,
-                    masked_done,
-                    episode_done=done,
-                )
-                if self.is_update():
-                    for _ in range(self.updates_per_step):
-                        self.learn_tsf()
-
-                observation = next_observation
-                feature = next_feature
-
-            if self.episodes % self.log_interval == 0:
-                wandb.log({"teacher/reward": episode_reward})
+    def learn(self):
+        if self.train_tsf:
+            self.learn_tsf()
+        else:
+            super().learn()
 
     def learn_tsf(self):
         self.learn_steps += 1
@@ -540,8 +647,7 @@ if __name__ == "__main__":
 
     Agent = TEACHER_SFGPI  # SFGPIAgent, TEACHER_SFGPI
 
-    env = "multitask-v0"
-    # env = "myInvertedDoublePendulum-v4"
+    env = "multitask-v0"  # "multitask-v0", "myInvertedDoublePendulum-v4"
     render = True
     auto_start_simulation = False
     if auto_start_simulation:
@@ -556,7 +662,7 @@ if __name__ == "__main__":
                 "gui": render,
                 "enable_meshes": True,
                 "auto_start_simulation": auto_start_simulation,
-                # "position": (0, 0, 25),  # initial spawned position
+                "position": (0, 0, 25),  # initial spawned position
             },
             "observation": {
                 "DBG_ROS": False,
@@ -568,27 +674,31 @@ if __name__ == "__main__":
             },
             "action": {
                 "DBG_ACT": False,
-                "act_noise_stdv": 0.0,
+                "act_noise_stdv": 0.01,
                 "thrust_range": [-0.25, 0.25],
             },
             "target": {
+                "type": "FixedGoal",
                 "DBG_ROS": False,
             },
             "tasks": {
                 "tracking": {
                     "ori_diff": np.array([0.0, 0.0, 0.0, 0.0]),
-                    "ang_diff": np.array([0.0, 0.0, 0.0]),
+                    "ang_diff": np.array([1.0, 1.0, 1.0]),
                     "angvel_diff": np.array([0.0, 0.0, 0.0]),
                     "pos_diff": np.array([0.0, 0.0, 1.0]),
-                    "vel_diff": np.array([0.0, 0.0, 0.0]),
+                    "vel_diff": np.array([0.0, 0.0, 1.0]),
                     "vel_norm_diff": np.array([0.0]),
                 },
                 "constraint": {
-                    "action_cost": np.array([0.001]),
-                    "pos_ubnd_cost": np.array([0.0, 0.0, 0.1]),  # x,y,z
-                    "pos_lbnd_cost": np.array([0.0, 0.0, 0.1]),  # x,y,z
+                    "action_cost": np.array([0.1]),
+                    "pos_ubnd_cost": np.array([0.0, 0.0, 0.1]),
+                    "pos_lbnd_cost": np.array([0.0, 0.0, 0.1]),
                 },
-                "success": {"pos": np.array([0.0, 0.0, 10.0])},  # x,y,z
+                "success": {
+                    "pos": np.array([0.0, 0.0, 10.0]),
+                    "fail": np.array([-10.0]),
+                },
             },
         }
         env_kwargs = {"config": env_config}
@@ -601,8 +711,15 @@ if __name__ == "__main__":
             render=render,
             task_schedule=None,
             task_manual=None,
-            min_batch_size=int(2),
-            min_n_experience=int(10),
+            n_teacher_episodes=5,
+            min_batch_size=int(256),
+            min_n_experience=int(2048),
+            multi_step=3,
+            updates_per_step=3,
+            alpha=0.2,
+            policy_class="GaussianMixture",
+            net_kwargs={"value_sizes": [128, 128], "policy_sizes": [64, 64]},
+            pretrain_sf_epochs=1e4,
         )
     )
 

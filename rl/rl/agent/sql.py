@@ -3,9 +3,9 @@ import torch
 import torch.nn.functional as F
 from torch.optim import Adam
 import wandb
-from common.kernel import adaptive_isotropic_gaussian_kernel
-from common.policy import StochasticPolicy
-from common.util import (
+from agent.common.kernel import adaptive_isotropic_gaussian_kernel
+from agent.common.policy import StochasticPolicy
+from agent.common.util import (
     assert_shape,
     get_sa_pairs,
     get_sa_pairs_,
@@ -14,8 +14,8 @@ from common.util import (
     grad_false,
     update_params,
 )
-from common.value_function import TwinnedQNetwork
-from common.agent import BasicAgent
+from agent.common.value_function import TwinnedQNetwork
+from agent.common.agent import BasicAgent
 
 torch.autograd.set_detect_anomaly(True)  # detect NaN
 
@@ -157,8 +157,9 @@ class SQLAgent(BasicAgent):
         assert_shape(curr_q1, [None])
 
         next_q = self.calc_next_q(batch_next_state)
-        target_q, next_v = self.calc_target_q(next_q, batch_reward, batch_done)
         assert_shape(next_q, [None, self.value_n_particles])
+
+        target_q, next_v = self.calc_target_q(next_q, batch_reward, batch_done)
         assert_shape(target_q, [None])
 
         mean_q1 = curr_q1.detach().mean().item()
