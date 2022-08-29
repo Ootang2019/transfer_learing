@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .util import get_sa_pairs, check_dim
+from .util import get_sa_pairs
 from .distribution import GaussianMixture
 import numpy as np
 from torch.distributions import Normal
@@ -99,27 +99,22 @@ class GaussianPolicy(BaseNetwork):
         x = self.fc3(x)
         x = self.tanh(x) if self.squash else x
 
-        mean, log_std = torch.chunk(x, 2, dim=-1)
-        log_std = torch.clamp(log_std, min=self.LOG_STD_MIN, max=self.LOG_STD_MAX)
+        means, log_stds = torch.chunk(x, 2, dim=-1)
+        log_stds = torch.clamp(log_stds, min=self.LOG_STD_MIN, max=self.LOG_STD_MAX)
 
-        return mean, log_std
-
-    def sample(self, obs):
-        if obs.dim() == 1:
-            obs = obs.unsqueeze(0)
-        # calculate Gaussian distribusion of (mean, std)
-        means, log_stds = self.forward(obs)
         stds = log_stds.exp()
         normals = Normal(means, stds)
-        # sample actions
         xs = normals.rsample()
         actions = torch.tanh(xs)
+
         # calculate entropies
         log_probs = normals.log_prob(xs) - torch.log(1 - actions.pow(2) + self.eps)
+        logp = log_probs.sum(dim=1, keepdim=True)
 
-        entropies = -log_probs.sum(dim=1, keepdim=True)
+        return actions, logp, torch.tanh(means)
 
-        return actions, entropies, torch.tanh(means)
+    def sample(self, obs):
+        return self.forward(obs)
 
 
 class GMMPolicy(BaseNetwork):
@@ -149,14 +144,13 @@ class GMMPolicy(BaseNetwork):
             reparameterize=reparameterize,
         )
 
-    def forward(self, obs):
-        obs, n_sample = check_dim(obs)
+    def forward(self, obs, n_particles=1):
 
         act, logp, mean = self.model(obs)
         act = torch.tanh(act)
         mean = torch.tanh(mean)
         logp -= self.squash_correction(act)
-        return act, logp, mean
+        return act, logp[:, None], mean
 
     def squash_correction(self, inp):
         return torch.sum(torch.log(1 - torch.tanh(inp) ** 2 + EPS), 1)
@@ -189,8 +183,6 @@ class GMMChi(GMMPolicy):
         self.action_strategy = action_strategy
 
     def act(self, obs, w):
-        obs, n_sample = check_dim(obs)
-
         chi, logp = self.get_chi(obs)
         p = torch.exp(logp)
 
