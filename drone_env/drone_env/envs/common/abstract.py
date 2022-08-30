@@ -232,7 +232,8 @@ class ROSAbstractEnv(AbstractEnv):
                 reset_world_or_sim="WORLD",
                 time_step=self.config["simulation"]["simulation_time_step"],
             )
-        self.rate = rospy.Rate(self.config["simulation_frequency"])
+        self.sim_freq = self.config["simulation_frequency"]
+        self.rate = rospy.Rate(self.sim_freq)
 
         self._pub_and_sub = False
         self.define_spaces()

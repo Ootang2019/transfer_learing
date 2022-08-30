@@ -4,8 +4,9 @@ import torch
 import numpy as np
 import wandb
 from rltorch.memory import MultiStepMemory
-from agent.common.replay_buffer import MyMultiStepMemory
+from agent.common.replay_buffer import MyMultiStepMemory, MyPrioritizedMemory
 from agent.common.util import (
+    to_batch,
     assert_shape,
     np2ts,
     ts2np,
@@ -109,14 +110,14 @@ class BasicAgent(AbstractAgent):
         self.episodes += 1
         episode_steps = 0
         done = False
-        observation = self.env.reset()
+        obs = self.env.reset()
 
         while not done:
             if self.render:
                 self.env.render()
 
-            action = self.act(observation)
-            next_observation, reward, done, _ = self.env.step(action)
+            action = self.act(obs)
+            next_obs, reward, done, _ = self.env.step(action)
             self.steps += 1
             episode_steps += 1
             episode_reward += reward
@@ -126,10 +127,10 @@ class BasicAgent(AbstractAgent):
             else:
                 masked_done = done
             self.replay_buffer.append(
-                observation,
+                obs,
                 action,
                 reward,
-                next_observation,
+                next_obs,
                 masked_done,
                 episode_done=done,
             )
@@ -138,12 +139,12 @@ class BasicAgent(AbstractAgent):
                 for _ in range(self.updates_per_step):
                     self.learn()
 
-            observation = next_observation
+            obs = next_obs
 
         if self.episodes % self.log_interval == 0:
             wandb.log({"reward/train": episode_reward})
 
-    def act(self, observation):
+    def act(self, obs):
         raise NotImplementedError
 
     def learn(self):
@@ -166,6 +167,10 @@ class MultiTaskAgent(BasicAgent):
         replay_buffer_size: int = 1000000,
         gamma: float = 0.99,
         multi_step: int = 1,
+        prioritized_memory: bool = False,
+        alpha: float = 0.6,
+        beta: float = 0.4,
+        beta_annealing: float = 0.0001,
         mini_batch_size: int = 128,
         min_n_experience: int = 1024,
         updates_per_step: int = 1,
@@ -173,7 +178,7 @@ class MultiTaskAgent(BasicAgent):
         log_interval=10,
         eval=True,
         eval_interval=1e2,
-        evaluate_episodes=3,
+        evaluate_episodes=10,
         seed=0,
         **kwargs,
     ):
@@ -199,6 +204,7 @@ class MultiTaskAgent(BasicAgent):
         self.eval = eval
         self.eval_interval = eval_interval
         self.evaluate_episodes = evaluate_episodes
+        self.success_rate = 0
 
         if self.env.max_episode_steps is not None:
             self.max_episode_steps = self.env.max_episode_steps
@@ -211,71 +217,120 @@ class MultiTaskAgent(BasicAgent):
         self.action_dim = self.env.action_space.shape[0]
         self.feature_dim = self.env.feature_space.shape[0]
         self.w = np.array(self.env.w)
-        self.feature_scale = np.array(self.env.w)
 
-        self.replay_buffer = MyMultiStepMemory(
-            int(self.replay_buffer_size),
-            self.env.observation_space.shape,
-            self.env.feature_space.shape,
-            self.env.action_space.shape,
-            device,
-            self.gamma,
-            self.multi_step,
-        )
+        self.prioritized_memory = prioritized_memory
+        if self.prioritized_memory:
+            self.replay_buffer = MyPrioritizedMemory(
+                int(self.replay_buffer_size),
+                self.env.observation_space.shape,
+                self.env.feature_space.shape,
+                self.env.action_space.shape,
+                device,
+                self.gamma,
+                self.multi_step,
+                alpha=alpha,
+                beta=beta,
+                beta_annealing=beta_annealing,
+            )
+        else:
+            self.replay_buffer = MyMultiStepMemory(
+                int(self.replay_buffer_size),
+                self.env.observation_space.shape,
+                self.env.feature_space.shape,
+                self.env.action_space.shape,
+                device,
+                self.gamma,
+                self.multi_step,
+            )
 
     def train_episode(self):
         episode_reward = 0
         self.episodes += 1
         episode_steps = 0
         done = False
-        observation, feature = self.reset_env()
+        obs, feature = self.reset_env()
 
         while not done:
-            if self.render:
-                try:
-                    self.env.render()
-                except:
-                    warnings.warn("env has no rendering method")
+            self.render_env()
 
-            action = self.act(observation)
-            next_observation, reward, done, info = self.env.step(action)
+            action = self.act(obs)
+            next_obs, reward, done, info = self.env.step(action)
             next_feature = info["features"]
+            masked_done = False if episode_steps >= self.max_episode_steps else done
+
             self.steps += 1
             episode_steps += 1
             episode_reward += reward
-            masked_done = False if episode_steps >= self.max_episode_steps else done
 
-            self.replay_buffer.append(
-                observation,
-                feature,
-                action,
-                reward,
-                next_observation,
-                masked_done,
-                episode_done=done,
+            self.save_to_buffer(
+                done, obs, feature, action, next_obs, reward, masked_done
             )
-
             if self.is_update():
                 for _ in range(self.updates_per_step):
                     self.learn()
 
-            observation = next_observation
+            obs = next_obs
             feature = next_feature
 
         if self.episodes % self.log_interval == 0:
-            wandb.log({"reward/train": episode_reward})
+            self.log_training(episode_reward, episode_steps, info)
 
         if self.eval and (self.episodes % self.eval_interval == 0):
             self.evaluate()
 
+        self.post_episode_process()
+
+    def render_env(self):
+        if self.render:
+            try:
+                self.env.render()
+            except:
+                warnings.warn("env has no rendering method")
+
+    def log_training(self, episode_reward, episode_steps, info):
+        wandb.log({"reward/train_reward": episode_reward})
+
+        try:
+            crash_rate = int(info["terminal_info"]["fail"]) / episode_steps
+            wandb.log({"reward/train_crash_rate": crash_rate})
+        except:
+            pass
+
+    def save_to_buffer(self, done, obs, feature, action, next_obs, reward, masked_done):
+        if self.prioritized_memory:
+            batch = to_batch(
+                obs, feature, action, reward, next_obs, masked_done, device
+            )
+            error = self.calc_priority_error(batch)
+            self.replay_buffer.append(
+                obs,
+                feature,
+                action,
+                reward,
+                next_obs,
+                masked_done,
+                error,
+                done,
+            )
+        else:
+            self.replay_buffer.append(
+                obs,
+                feature,
+                action,
+                reward,
+                next_obs,
+                masked_done,
+                done,
+            )
+
     def reset_env(self):
         try:
-            observation, info = self.env.reset()
+            obs, info = self.env.reset()
             feature = info["features"]
         except ValueError:
-            observation = self.env.reset()
+            obs = self.env.reset()
             feature = np.zeros(self.feature_dim)
-        return observation, feature
+        return obs, feature
 
     def evaluate(self):
         episodes = self.evaluate_episodes
@@ -284,21 +339,36 @@ class MultiTaskAgent(BasicAgent):
 
         mode = "exploit"
         returns = np.zeros((episodes,), dtype=np.float32)
+        success = 0
 
         for i in range(episodes):
-            observation, info = self.reset_env()
+            obs, info = self.reset_env()
             episode_reward = 0.0
             done = False
             while not done:
-                action = self.act(observation, mode)
-                next_observation, reward, done, _ = self.env.step(action)
+                action = self.act(obs, mode)
+                next_obs, reward, done, info = self.env.step(action)
                 episode_reward += reward
-                observation = next_observation
+                obs = next_obs
+
             returns[i] = episode_reward
+            success += int(self.is_success(info))
 
         mean_return = np.mean(returns)
-
+        self.success_rate = success / episodes
         wandb.log({"reward/test": mean_return})
+        wandb.log({"reward/test_surrccess_rate": self.success_rate})
+
+    def is_success(self, info):
+        success = False
+
+        try:
+            if info["terminal_info"]["success"]:
+                success = True
+        except:
+            pass
+
+        return int(success)
 
     def act(self, obs, mode="explore"):
         if self.start_steps > self.steps:
@@ -321,6 +391,12 @@ class MultiTaskAgent(BasicAgent):
 
         act = ts2np(act_ts)
         return act
+
+    def post_episode_process(self):
+        pass
+
+    def calc_priority_error(self, batch):
+        raise NotImplementedError
 
     def explore(self):
         raise NotImplementedError

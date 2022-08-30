@@ -62,7 +62,8 @@ class MultiTaskEnv(BaseEnv):
                         "vel_norm_diff": np.array([1.0]),
                     },
                     "constraint": {
-                        "action_cost": np.array([1.0]),
+                        "survive": np.array([1.0]),
+                        "action_cost": np.array([0.1]),
                         "pos_ubnd_cost": np.array([0.1, 0.1, 0.1]),  # x,y,z
                         "pos_lbnd_cost": np.array([0.1, 0.1, 0.1]),  # x,y,z
                     },
@@ -94,6 +95,12 @@ class MultiTaskEnv(BaseEnv):
         )
 
         self.obs, self.obs_info = None, None
+        if self.observation_type.constraint is not None:
+            self.env_constraint = self.observation_type.constraint
+            self.pos_ubnd = self.env_constraint["pos_ubnd"]
+            self.pos_lbnd = self.env_constraint["pos_lbnd"]
+
+        self.success_timer = 0
 
     def one_step(
         self,
@@ -162,17 +169,19 @@ class MultiTaskEnv(BaseEnv):
         return float(reward), reward_info
 
     def reset(self) -> Observation:
-        self.steps = 0
-        self.done = False
+        self.reset_params()
         self._reset()
-
         self._sample_new_goal()
 
         obs, obs_info = self.observation_type.observe()
         self.obs, self.obs_info = obs, obs_info
-
         obs_info["features"] = self.calc_features(obs, obs_info)
         return obs, obs_info
+
+    def reset_params(self):
+        self.steps = 0
+        self.done = False
+        self.succecss_timer = 0
 
     def update_tasks(self, task: dict):
         self.tasks = task
@@ -183,17 +192,15 @@ class MultiTaskEnv(BaseEnv):
         feature_weights = np.concatenate(extract_nparray_from_dict(tasks["tracking"]))
         constr_weights = np.concatenate(extract_nparray_from_dict(tasks["constraint"]))
         success_weights = np.concatenate(extract_nparray_from_dict(tasks["success"]))
-
         return np.concatenate([feature_weights, constr_weights, success_weights])
 
     def calc_features(self, obs, obs_info):
         tracking_features = self.calc_track_features(obs)
         constraint_features = self.calc_constr_features(obs_info)
         success_features = self.calc_success_features(obs_info)
-        features = np.concatenate(
+        return np.concatenate(
             [tracking_features, constraint_features, success_features]
         )
-        return features
 
     def calc_track_features(self, obs: np.array) -> np.array:
         return -np.abs(obs[0 : self.tracking_feature_len])
@@ -201,10 +208,12 @@ class MultiTaskEnv(BaseEnv):
     def calc_constr_features(self, obs_info: dict) -> np.array:
         pos = obs_info["obs_dict"]["position"]
         constr_dict = obs_info["constr_dict"]
+        done, _ = self._is_terminal(obs_info)
 
+        survive = np.array([done]).astype(np.float32)
         act = np.array([self.action_type.action_rew()])
         pos_bnd = self.calc_dist_to_pos_bnd(pos, constr_dict)
-        return np.concatenate([act, pos_bnd])
+        return np.concatenate([survive, act, pos_bnd])
 
     def calc_dist_to_pos_bnd(self, pos: np.array, constr_dict: dict) -> np.array:
         """closer to the bnd the higher the cost"""
@@ -213,7 +222,7 @@ class MultiTaskEnv(BaseEnv):
 
         ubnd_cost = -np.exp(pos - ubnd_pos)
         lbnd_cost = -np.exp(-(pos - lbnd_pos))
-        return np.clip(np.concatenate([ubnd_cost, lbnd_cost]), -10, 0)
+        return np.clip(np.concatenate([ubnd_cost, lbnd_cost]), -10, 1)
 
     def calc_success_features(self, obs_info: dict) -> np.array:
         pos, goal_pos = (
@@ -222,8 +231,8 @@ class MultiTaskEnv(BaseEnv):
         )
         pos_success = self.position_task_successs(pos, goal_pos)
 
-        _, info = self._is_terminal(obs_info)
-        fail = np.array([info["fail"]]).astype(float)
+        _, ter_info = self._is_terminal(obs_info)
+        fail = np.array([ter_info["fail"]]).astype(float)
         return np.concatenate([pos_success, fail])
 
     def position_task_successs(self, pos: np.array, goal_pos: np.array) -> np.array:
@@ -251,24 +260,69 @@ class MultiTaskEnv(BaseEnv):
             time = self.steps >= int(self.config["duration"]) - 1
 
         success = False
+        success = self.check_success(obs_info)
 
         fail = False
-        if obs_info["obs_dict"]["position"][2] <= -60.0:
-            fail = True
-
-        if obs_info["obs_dict"]["position"][2] >= -1:
-            fail = True
+        if self.env_constraint is not None:
+            if (obs_info["obs_dict"]["position"] <= self.pos_lbnd).any():
+                fail = True
+            if (obs_info["obs_dict"]["position"] >= self.pos_ubnd).any():
+                fail = True
 
         if self.angle_reset:
             row = obs_info["obs_dict"]["angle"][0]
             if (row > np.pi - 1) or (row < -np.pi + 1):
                 fail = True
-
             pitch = obs_info["obs_dict"]["angle"][1]
             if (pitch > np.pi - 1) or (pitch < -np.pi + 1):
                 fail = True
 
         return time or success or fail, {"time": time, "success": success, "fail": fail}
+
+    def check_success(self, obs_info):
+        ang_diff = self.tasks["tracking"]["ang_diff"]
+        vel_diff = self.tasks["tracking"]["vel_diff"]
+        pos_diff = self.tasks["tracking"]["pos_diff"]
+
+        success_bnd = np.array([0.0, 0.0, 0.0])
+
+        if (pos_diff > 0).any():
+            value = obs_info["proc_dict"]["pos_diff"]
+            diff = pos_diff
+        elif (vel_diff > 0).any():
+            value = obs_info["proc_dict"]["vel_diff"]
+            diff = vel_diff
+        elif (ang_diff > 0).any():
+            value = obs_info["proc_dict"]["ang_diff"]
+            diff = ang_diff
+        else:
+            return False
+
+        success_bnd = np.array(
+            [
+                0.1 * (diff[0] > 0),
+                0.1 * (diff[1] > 0),
+                0.1 * (diff[2] > 0),
+            ]
+        )
+        success_bnd[success_bnd == 0] += 1
+        success = self.time_in_success_region(
+            value,
+            -success_bnd,
+            success_bnd,
+        )
+        return success
+
+    def time_in_success_region(self, val, val_lbnd, val_ubnd, time=5):
+        if (val > val_lbnd).all() and (val < val_ubnd).all():
+            self.success_timer += 1
+        else:
+            self.succecss_timer = 0
+
+        if self.succecss_timer > time * self.sim_freq:
+            return True
+
+        return False
 
     def _sample_new_goal(self):
         if self.config["target"]["type"] == "MultiGoal" and self.config["target"].get(

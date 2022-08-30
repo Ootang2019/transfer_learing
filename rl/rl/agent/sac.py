@@ -126,19 +126,15 @@ class SACAgent(MultiTaskAgent):
 
     def explore(self, state, w):
         # act with randomness
-        # state = torch.FloatTensor(state).unsqueeze(0).to(device)
         with torch.no_grad():
             action, _, _ = self.policy.sample(state)
         return action
-        # return action.cpu().numpy().reshape(-1)
 
     def exploit(self, state, w):
         # act without randomness
-        # state = torch.FloatTensor(state).unsqueeze(0).to(device)
         with torch.no_grad():
             _, _, action = self.policy.sample(state)
         return action
-        # return action.cpu().numpy().reshape(-1)
 
     def learn(self):
         self.learn_steps += 1
@@ -146,17 +142,23 @@ class SACAgent(MultiTaskAgent):
         if self.learn_steps % self.td_target_update_interval == 0:
             soft_update(self.critic_target, self.critic, self.tau)
 
-        batch = self.replay_buffer.sample(self.mini_batch_size)
+        if self.prioritized_memory:
+            batch, indices, weights = self.replay_buffer.sample(self.mini_batch_size)
+        else:
+            batch = self.replay_buffer.sample(self.mini_batch_size)
+            weights = 1
 
-        q1_loss, q2_loss, mean_q1, mean_q2 = self.calc_critic_loss(batch)
-        policy_loss, entropies = self.calc_policy_loss(batch)
+        q1_loss, q2_loss, errors, mean_q1, mean_q2 = self.calc_critic_loss(
+            batch, weights
+        )
+        policy_loss, entropies = self.calc_policy_loss(batch, weights)
 
         update_params(self.policy_optimizer, self.policy, policy_loss, self.grad_clip)
         update_params(self.q1_optimizer, self.critic.Q1, q1_loss, self.grad_clip)
         update_params(self.q2_optimizer, self.critic.Q2, q2_loss, self.grad_clip)
 
         if self.entropy_tuning:
-            entropy_loss = self.calc_entropy_loss(entropies)
+            entropy_loss = self.calc_entropy_loss(entropies, weights)
             update_params(self.alpha_optimizer, None, entropy_loss)
             self.alpha = self.log_alpha.exp()
             wandb.log(
@@ -165,6 +167,9 @@ class SACAgent(MultiTaskAgent):
                     "state/alpha": self.alpha.detach().item(),
                 }
             )
+
+        if self.prioritized_memory:
+            self.replay_buffer.update_priority(indices, errors.cpu().numpy())
 
         if self.learn_steps % self.log_interval == 0:
             metrics = {
@@ -177,22 +182,25 @@ class SACAgent(MultiTaskAgent):
             }
             wandb.log(metrics)
 
-    def calc_critic_loss(self, batch):
+    def calc_critic_loss(self, batch, weights):
         (observations, features, actions, rewards, next_observations, dones) = batch
         curr_q1, curr_q2 = self.calc_current_q(observations, actions)
         target_q = self.calc_target_q(rewards, next_observations, dones)
+
+        # TD errors for updating priority weights
+        errors = torch.abs(curr_q1.detach() - target_q)
 
         # We log means of Q to monitor training.
         mean_q1 = curr_q1.detach().mean().item()
         mean_q2 = curr_q2.detach().mean().item()
 
         # Critic loss is mean squared TD errors.
-        q1_loss = F.mse_loss(curr_q1, target_q)
-        q2_loss = F.mse_loss(curr_q2, target_q)
+        q1_loss = torch.mean((curr_q1 - target_q).pow(2) * weights)
+        q2_loss = torch.mean((curr_q2 - target_q).pow(2) * weights)
 
-        return q1_loss, q2_loss, mean_q1, mean_q2
+        return q1_loss, q2_loss, errors, mean_q1, mean_q2
 
-    def calc_policy_loss(self, batch):
+    def calc_policy_loss(self, batch, weights):
         (observations, features, actions, rewards, next_observations, dones) = batch
 
         # We re-sample actions to calculate expectations of Q.
@@ -202,14 +210,14 @@ class SACAgent(MultiTaskAgent):
         q = torch.min(q1, q2)
 
         # Policy objective is maximization of (Q + alpha * entropy).
-        policy_loss = torch.mean((-q - self.alpha * entropy))
+        policy_loss = torch.mean((-q - self.alpha * entropy) * weights)
         return policy_loss, entropy
 
-    def calc_entropy_loss(self, entropy):
+    def calc_entropy_loss(self, entropy, weights):
         # Intuitively, we increse alpha when entropy is less than target
         # entropy, vice versa.
         entropy_loss = -torch.mean(
-            self.log_alpha * (self.target_entropy - entropy).detach()
+            self.log_alpha * (self.target_entropy - entropy).detach() * weights
         )
         return entropy_loss
 
@@ -227,6 +235,14 @@ class SACAgent(MultiTaskAgent):
         target_q = self.reward_scale * rewards + (1.0 - dones) * self.gamma * next_q
 
         return target_q
+
+    def calc_priority_error(self, batch):
+        (obs, _, act, rewards, next_obs, dones) = batch
+        with torch.no_grad():
+            curr_q1, curr_q2 = self.calc_current_q(obs, act)
+        target_q = self.calc_target_q(rewards, next_obs, dones)
+        error = torch.abs(curr_q1 - target_q).item()
+        return error
 
 
 if __name__ == "__main__":

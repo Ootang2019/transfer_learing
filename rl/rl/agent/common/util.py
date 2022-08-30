@@ -128,14 +128,21 @@ def ts2np(obj: torch.Tensor) -> np.ndarray:
 
 
 def to_batch(
-    batch_state, batch_action, batch_reward, batch_next_state, batch_done, device
+    state,
+    feature,
+    action,
+    reward,
+    next_state,
+    done,
+    device,
 ):
-    batch_state = torch.FloatTensor(np.array(batch_state)).to(device)
-    batch_action = torch.FloatTensor(np.array(batch_action)).to(device)
-    batch_reward = torch.FloatTensor(np.array(batch_reward)).unsqueeze(1).to(device)
-    batch_next_state = torch.FloatTensor(np.array(batch_next_state)).to(device)
-    batch_done = torch.FloatTensor(np.array(batch_done)).unsqueeze(1).to(device)
-    return batch_state, batch_action, batch_reward, batch_next_state, batch_done
+    state = torch.FloatTensor(state).unsqueeze(0).to(device)
+    feature = torch.FloatTensor(feature).to(device)
+    action = torch.FloatTensor([action]).view(1, -1).to(device)
+    reward = torch.FloatTensor([reward]).unsqueeze(0).to(device)
+    next_state = torch.FloatTensor(next_state).unsqueeze(0).to(device)
+    done = torch.FloatTensor([done]).unsqueeze(0).to(device)
+    return state, feature, action, reward, next_state, done
 
 
 def update_params(optim, network, loss, grad_clip=None, retain_graph=False):
@@ -147,16 +154,6 @@ def update_params(optim, network, loss, grad_clip=None, retain_graph=False):
     optim.step()
 
 
-def generate_grid_schedule(gap, feature_dim, feature_scale):
-    l = []
-    for _ in range(feature_dim):
-        x = np.arange(0.0, 1.0 + gap, gap)
-        l.append(x)
-    g = np.meshgrid(*l)
-    rgrid = []
-    for i in range(len(g)):
-        rgrid.append(g[i].reshape(-1, 1))
-    grid = np.concatenate(rgrid, 1)
-    grid = np.delete(grid, 0, 0)
-    grid *= feature_scale
-    return grid
+def update_learning_rate(optimizer, learning_rate):
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = learning_rate
