@@ -24,6 +24,7 @@ from agent.common.util import (
     assert_shape,
 )
 from agent.common.value_function import TwinnedSFNetwork
+from agent.task_config import get_task_schedule
 
 # disable api to speed up
 torch.autograd.set_detect_anomaly(False)  # detect NaN
@@ -118,6 +119,7 @@ class SFGPIAgent(MultiTaskAgent):
                 self.create_sf_policy()
         else:
             self.create_sf_policy()
+        print(f"{len(self.pols)} policies are created")
 
         if self.entropy_tuning:
             self.alpha_lr = config.get("alpha_lr", 3e-4)
@@ -476,23 +478,6 @@ class SFGPIAgent(MultiTaskAgent):
         policy_optimizer = Adam(policy.parameters(), lr=self.pol_lr)
         return policy, policy_optimizer
 
-    def update_task(self, w):
-        super().update_task(w)
-        if self.create_new_pol(w):
-            self.create_sf_policy()
-
-    def create_new_pol(self, w):
-        """should we create new set of policies"""
-        b = False
-
-        if not self.create_policy:
-            b = True
-
-        if w not in self.prev_ws:
-            b = True
-
-        return b
-
 
 class TEACHER_SFGPI(SFGPIAgent):
     @classmethod
@@ -501,6 +486,7 @@ class TEACHER_SFGPI(SFGPIAgent):
         config.update(
             {
                 "train_tsf": True,
+                "enable_reset_controller": True,
                 "n_teacher_episodes": 60,
                 "pretrain_sf_epochs": 1e4,
             }
@@ -513,8 +499,11 @@ class TEACHER_SFGPI(SFGPIAgent):
         self.n_teacher_episodes = config.get("n_teacher_episodes", 60)
         self.pretrain_sf_epochs = config.get("pretrain_sf_epochs", 1e4)
 
+        self.enable_tsf = config.get("train_tsf", True)
         self.teachers = [AttitudePID(), PositionPID()]
-        self.train_tsf = config.get("train_tsf", True)
+
+        self.enable_reset_ctrl = config.get("enable_reset_controller", True)
+        self.reset_ctrl = PositionPID()
 
         self.tsfs, self.tsf_tars, self.tsf_optims = [], [], []
         for _ in range(len(self.teachers)):
@@ -523,27 +512,37 @@ class TEACHER_SFGPI(SFGPIAgent):
         self.reset_teachers()
         self.stu_act_cnt = 0
         self.tea_act_cnt = 0
-        self.teacher_idx = 0
+        self.tidx = 0
+
+        self.origin_goal = []
+        self.safe_goal_isset = False
 
     def run(self):
-        if self.train_tsf:
+        if self.enable_tsf:
             for i in range(len(self.teachers)):
-                self.teacher_idx = i
+                self.tidx = i
                 for j in range(self.n_teacher_episodes):
-                    print(f"========= teacher{i} sf episode {j} =========")
+                    print(f"========= train teacher_sf {i} steps {j} =========")
                     self.train_episode()
-            self.pretrain_student()
-        self.train_tsf = False
+
+            for i in range(len(self.pols)):
+                print(f"========= pretrain student policy {i}  =========")
+                self.pretrain_student(i)
+
+        self.enable_tsf = False
+        self.steps = 0  # reset steps spent by training teacher sf
         return super().run()
 
-    def pretrain_student(self):
-        hard_update(self.sfs[0], self.tsfs[0])
-        hard_update(self.sf_tars[0], self.tsf_tars[0])
-        self.pretrain_pol(0, self.pretrain_sf_epochs)
+    def pretrain_student(self, idx=0):
+        for i in range(len(self.tsfs)):
+            hard_update(self.sfs[i], self.tsfs[i])
+            hard_update(self.sf_tars[i], self.tsf_tars[i])
+        self.pretrain_pol(idx, self.pretrain_sf_epochs)
 
-    def pretrain_pol(self, pol_idx=0, pretrain_epochs=1e3):
-        print(f"start pretraing policy{pol_idx}")
-        i = pol_idx
+    def pretrain_pol(self, task_idx, pretrain_epochs=1e3):
+        i = task_idx
+        w = self.task_to_w(self.task_schedule[i])
+        w = torch.tensor(w, dtype=torch.float32).to(device)
         for epoch in range(int(pretrain_epochs)):
             if self.prioritized_memory:
                 batch, indices, weights = self.replay_buffer.sample(
@@ -569,17 +568,12 @@ class TEACHER_SFGPI(SFGPIAgent):
                 with torch.no_grad():
                     (obs, _, _, _, _, _) = batch
                     _, _, act = self.pols[i](obs)
-                    _, _, tact = self.teachers[i](obs)
-
-                    q = self.calc_q_from_sf(obs, act, self.sf_tars[i], self.w)
-                    tq = self.calc_q_from_sf(obs, tact, self.sf_tars[i], self.w)
+                    q = self.calc_q_from_sf(obs, act, self.sf_tars[i], w)
 
                 metrics = {
                     "pretrain/loss": pol_loss,
                     "pretrain/q_value": q.mean().item(),
-                    "pretrain/tq_value": tq.mean().item(),
                     "pretrain/act": act,
-                    "pretrain/tact": tact,
                 }
                 wandb.log(metrics)
 
@@ -625,14 +619,95 @@ class TEACHER_SFGPI(SFGPIAgent):
         return tacts, tqs
 
     def act(self, obs, mode="explore"):
-        if self.train_tsf:
-            action = ts2np(self.teachers[self.teacher_idx].act(np2ts(obs)))
+        if self.trigger_reset(obs):  # overwrite action by reset controller
+            if not self.safe_goal_isset:
+                self.set_safe_goal()
+            action = ts2np(self.reset_ctrl.act(np2ts(obs)))
+            return action
+        else:
+            self.set_origin_goal()
+
+        if self.enable_tsf:
+            action = ts2np(self.teachers[self.tidx].act(np2ts(obs)))
         else:
             action = super().act(obs, mode)
         return action
 
+    def set_safe_goal(self):
+        print("set safe goal")
+        self.origin_goal = [
+            self.env.target_type.pos_cmd_data,
+            self.env.target_type.vel_cmd_data,
+            self.env.target_type.ang_cmd_data,
+            self.env.target_type.ori_cmd_data,
+            self.env.target_type.angvel_cmd_data,
+        ]
+        self.env.target_type.pos_cmd_data = np.array([0, 0, -25])
+        self.safe_goal_isset = True
+
+    def set_origin_goal(self):
+        self.safe_goal_isset = False
+        try:
+            self.env.target_type.pos_cmd_data = self.origin_goal[0]
+            self.env.target_type.vel_cmd_data = self.origin_goal[1]
+            self.env.target_type.ang_cmd_data = self.origin_goal[2]
+            self.env.target_type.ori_cmd_data = self.origin_goal[3]
+            self.env.target_type.angvel_cmd_data = self.origin_goal[4]
+        except:
+            pass
+
+    def trigger_reset(self, obs):
+        if self.enable_reset_ctrl:
+            if self.hard_reset_condition(obs):
+                return True
+
+            # risk = self.measure_risk(obs)
+            # if risk > self.risk_threshold:
+            #     return True
+
+        return False
+
+    def hard_reset_condition(self, obs):
+        obs_info = self.env.obs_info
+        pos_lbnd = self.env.pos_lbnd + 5
+        pos_ubnd = self.env.pos_ubnd - 5
+        vel_ubnd = np.array([2, 2, 1.5])
+        ang_bnd = 0.015
+
+        if (obs_info["obs_dict"]["position"] <= pos_lbnd).any():
+            print("trigger position lower bnd, engage reset ctrl")
+            print("current position", obs_info["obs_dict"]["position"])
+            print("position limit", pos_lbnd)
+            return True
+        if (obs_info["obs_dict"]["position"] >= pos_ubnd).any():
+            print("trigger position upper bnd, engage reset ctrl")
+            print("current position", obs_info["obs_dict"]["position"])
+            print("position limit", pos_ubnd)
+            return True
+
+        if (np.abs(obs_info["obs_dict"]["velocity"]) >= vel_ubnd).any():
+            print("trigger velocity uppder bnd, engage reset ctrl")
+            print("current velocity", obs_info["obs_dict"]["velocity"])
+            print("velocity limit", vel_ubnd)
+            return True
+
+        roll = obs_info["obs_dict"]["angle"][0]
+        if (roll > ang_bnd) or (roll < -ang_bnd):
+            print("trigger roll ctrl bnd, engage reset ctrl")
+            print("current roll angle", roll)
+            print("angle limit", ang_bnd)
+            return True
+        pitch = obs_info["obs_dict"]["angle"][1]
+        if (pitch > ang_bnd) or (pitch < -ang_bnd):
+            print("trigger pitch ctrl bnd, engage reset ctrl")
+            print("current pitch angle", pitch)
+            print("angle limit", ang_bnd)
+            return True
+
+        return False
+
     def learn(self):
-        if self.train_tsf:
+        if self.enable_tsf:
             self.learn_tsf()
         else:
             super().learn()
@@ -649,7 +724,7 @@ class TEACHER_SFGPI(SFGPIAgent):
             batch = self.replay_buffer.sample(self.mini_batch_size)
             weights = 1
 
-        i = self.teacher_idx
+        i = self.tidx
         (tsf_loss, errors, mean_tsf, target_tsf,) = self.calc_sf_loss(
             batch, self.tsfs[i], self.tsf_tars[i], self.teachers[i], weights
         )
@@ -691,13 +766,16 @@ class TEACHER_SFGPI(SFGPIAgent):
 
     def reset_env(self):
         self.reset_teachers()
+        self.origin_goal = []
+        self.safe_goal_set = False
         self.stu_act_cnt = 0
         self.tea_act_cnt = 0
         return super().reset_env()
 
     def reset_teachers(self):
-        for pol in self.teachers:
-            pol.reset()
+        if self.enable_tsf:
+            for pol in self.teachers:
+                pol.reset()
 
 
 if __name__ == "__main__":
@@ -778,20 +856,21 @@ if __name__ == "__main__":
             env=env,
             env_kwargs=env_kwargs,
             render=render,
-            task_schedule=None,
-            n_teacher_episodes=1,  # 10
-            min_batch_size=int(2),  # 256
-            min_n_experience=int(10),  # 2048
             multi_step=1,
             updates_per_step=2,
             n_particles=64,
             n_gauss=4,
-            policy_class="GaussianMixture",
-            net_kwargs={"value_sizes": [128, 128], "policy_sizes": [32, 32]},
-            pretrain_sf_epochs=10,  # 5e4
+            n_teacher_episodes=10,  # 10
+            min_batch_size=int(256),  # 256
+            min_n_experience=int(2048),  # 2048
+            total_timesteps=1e6,  # 1e6
+            pretrain_sf_epochs=1e4,  # 1e4
             entropy_tuning=True,
             normalize_critic=True,
             compute_target_by_sfv=True,
+            task_schedule=get_task_schedule(),
+            policy_class="GaussianMixture",
+            net_kwargs={"value_sizes": [128, 128], "policy_sizes": [32, 32]},
         )
     )
 

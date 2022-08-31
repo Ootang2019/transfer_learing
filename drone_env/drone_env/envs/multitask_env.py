@@ -270,8 +270,8 @@ class MultiTaskEnv(BaseEnv):
                 fail = True
 
         if self.angle_reset:
-            row = obs_info["obs_dict"]["angle"][0]
-            if (row > np.pi - 1) or (row < -np.pi + 1):
+            roll = obs_info["obs_dict"]["angle"][0]
+            if (roll > np.pi - 1) or (roll < -np.pi + 1):
                 fail = True
             pitch = obs_info["obs_dict"]["angle"][1]
             if (pitch > np.pi - 1) or (pitch < -np.pi + 1):

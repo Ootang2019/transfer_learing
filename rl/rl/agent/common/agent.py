@@ -227,7 +227,7 @@ class MultiTaskAgent(BasicAgent):
             )
         else:
             self.budget_per_task = self.total_timesteps
-        self.try_update_task()
+        self.update_task()
 
         self.prioritized_memory = prioritized_memory
         if self.prioritized_memory:
@@ -425,23 +425,23 @@ class MultiTaskAgent(BasicAgent):
             if self.task_idx < len(self.task_schedule) - 1:
                 self.task_idx += 1
                 self.prev_ws.append(self.env.w)
+                print(f"master current task and switch to task{self.task_idx}")
             else:
-                print("no more task to learn")
                 self.learn_all_tasks = True
+                print("all tasks learned")
         elif self.task_budget_exhaust():
             if self.task_idx < len(self.task_schedule) - 1:
                 self.task_idx += 1
                 self.prev_ws.append(self.env.w)
+                print(f"current task budget exhaust and switch to task{self.task_idx}")
             else:
                 self.task_idx = 0
                 self.prev_ws.append(self.env.w)
+                print(f"current task budget exhaust and switch to task{self.task_idx}!")
 
         self.update_task()
 
     def update_task(self):
-        self.try_update_task()
-
-    def try_update_task(self):
         if self.task_schedule is not None:
             try:
                 task = self.task_schedule[self.task_idx]
@@ -459,10 +459,14 @@ class MultiTaskAgent(BasicAgent):
 
     def update_task_by_task_dict(self, task):
         """update task by task dictionary"""
-        self.env.update_task_weights(task)
-        w = self.env.get_tasks_weights()
+        w = self.task_to_w(task)
         self.w = torch.tensor(w, dtype=torch.float32).to(device)
         assert self.w.shape == (self.feature_dim,)
+
+    def task_to_w(self, task):
+        self.env.update_tasks(task)
+        w = self.env.get_tasks_weights()
+        return w
 
     def update_task_by_task_weight(self, w):
         """update task by task weights"""
@@ -479,4 +483,7 @@ class MultiTaskAgent(BasicAgent):
         return master
 
     def task_budget_exhaust(self):
-        self.steps >= self.budget_per_task * (len(self.prev_ws) + 1)
+        next_task_step = int(self.budget_per_task * (len(self.prev_ws) + 1))
+        print("steps", self.steps)
+        print("switch next task at", next_task_step)
+        return self.steps >= next_task_step
