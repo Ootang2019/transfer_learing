@@ -174,11 +174,13 @@ class MultiTaskAgent(BasicAgent):
         mini_batch_size: int = 128,
         min_n_experience: int = 1024,
         updates_per_step: int = 1,
+        train_ntime_per_task: int = 3,
         render: bool = False,
         log_interval=10,
         eval=True,
-        eval_interval=1e2,
+        eval_interval=10,
         evaluate_episodes=10,
+        task_schedule=None,
         seed=0,
         **kwargs,
     ):
@@ -198,13 +200,10 @@ class MultiTaskAgent(BasicAgent):
             seed,
             **kwargs,
         )
-        self.learn_steps = 0
-        self.episodes = 0
 
         self.eval = eval
         self.eval_interval = eval_interval
         self.evaluate_episodes = evaluate_episodes
-        self.success_rate = 0
 
         if self.env.max_episode_steps is not None:
             self.max_episode_steps = self.env.max_episode_steps
@@ -216,7 +215,19 @@ class MultiTaskAgent(BasicAgent):
         self.observation_dim = self.env.observation_space.shape[0]
         self.action_dim = self.env.action_space.shape[0]
         self.feature_dim = self.env.feature_space.shape[0]
-        self.w = np.array(self.env.w)
+
+        self.task_idx = 0
+        self.prev_ws = []
+        self.learn_all_tasks = False
+        self.task_schedule = task_schedule
+        self.train_ntime_per_task = train_ntime_per_task
+        if task_schedule is not None:
+            self.budget_per_task = self.total_timesteps / (
+                len(self.task_schedule) * self.train_ntime_per_task
+            )
+        else:
+            self.budget_per_task = self.total_timesteps
+        self.try_update_task()
 
         self.prioritized_memory = prioritized_memory
         if self.prioritized_memory:
@@ -243,7 +254,14 @@ class MultiTaskAgent(BasicAgent):
                 self.multi_step,
             )
 
+        self.learn_steps = 0
+        self.episodes = 0
+        self.success_rate = 0
+
     def train_episode(self):
+        if self.task_schedule is not None:
+            self.change_task()
+
         episode_reward = 0
         self.episodes += 1
         episode_steps = 0
@@ -337,7 +355,6 @@ class MultiTaskAgent(BasicAgent):
         if episodes == 0:
             return
 
-        mode = "exploit"
         returns = np.zeros((episodes,), dtype=np.float32)
         success = 0
 
@@ -346,7 +363,7 @@ class MultiTaskAgent(BasicAgent):
             episode_reward = 0.0
             done = False
             while not done:
-                action = self.act(obs, mode)
+                action = self.act(obs, "exploit")
                 next_obs, reward, done, info = self.env.step(action)
                 episode_reward += reward
                 obs = next_obs
@@ -356,18 +373,16 @@ class MultiTaskAgent(BasicAgent):
 
         mean_return = np.mean(returns)
         self.success_rate = success / episodes
-        wandb.log({"reward/test": mean_return})
-        wandb.log({"reward/test_surrccess_rate": self.success_rate})
+        wandb.log({"evaluate/reward": mean_return})
+        wandb.log({"evaluate/surrccess_rate": self.success_rate})
 
     def is_success(self, info):
         success = False
-
         try:
             if info["terminal_info"]["success"]:
                 success = True
         except:
             pass
-
         return int(success)
 
     def act(self, obs, mode="explore"):
@@ -405,7 +420,63 @@ class MultiTaskAgent(BasicAgent):
         raise NotImplementedError
 
     def change_task(self):
-        raise NotImplementedError
+        """if a current task is mastered then update task according to schedule"""
+        if self.master_current_task():
+            if self.task_idx < len(self.task_schedule) - 1:
+                self.task_idx += 1
+                self.prev_ws.append(self.env.w)
+            else:
+                print("no more task to learn")
+                self.learn_all_tasks = True
+        elif self.task_budget_exhaust():
+            if self.task_idx < len(self.task_schedule) - 1:
+                self.task_idx += 1
+                self.prev_ws.append(self.env.w)
+            else:
+                self.task_idx = 0
+                self.prev_ws.append(self.env.w)
+
+        self.update_task()
+
+    def update_task(self):
+        self.try_update_task()
+
+    def try_update_task(self):
+        if self.task_schedule is not None:
+            try:
+                task = self.task_schedule[self.task_idx]
+                self.update_task_by_task_dict(task)
+            except:
+                w = self.task_schedule[self.task_idx]
+                self.update_task_by_task_weight(w)
+        else:
+            try:
+                task = self.env.task
+                self.update_task_by_task_dict(task)
+            except:
+                w = self.env.w
+                self.update_task_by_task_weight(w)
+
+    def update_task_by_task_dict(self, task):
+        """update task by task dictionary"""
+        self.env.update_task_weights(task)
+        w = self.env.get_tasks_weights()
+        self.w = torch.tensor(w, dtype=torch.float32).to(device)
+        assert self.w.shape == (self.feature_dim,)
+
+    def update_task_by_task_weight(self, w):
+        """update task by task weights"""
+        self.env.w = w
+        self.w = torch.tensor(w, dtype=torch.float32).to(device)
+        assert self.w.shape == (self.feature_dim,)
 
     def master_current_task(self):
-        raise NotImplementedError
+        """is current task mastered?"""
+        master = False
+        if self.success_rate >= 0.9:
+            master = True
+            self.success_rate = 0
+        return master
+
+    def task_budget_exhaust(self):
+        self.steps >= self.budget_per_task * (len(self.prev_ws) + 1)

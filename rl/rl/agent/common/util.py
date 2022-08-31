@@ -157,3 +157,8 @@ def update_params(optim, network, loss, grad_clip=None, retain_graph=False):
 def update_learning_rate(optimizer, learning_rate):
     for param_group in optimizer.param_groups:
         param_group["lr"] = learning_rate
+
+
+def linear_schedule(cur_step, tot_step, schedule):
+    progress = cur_step / tot_step
+    return progress * (schedule[1] - schedule[0]) + schedule[0]

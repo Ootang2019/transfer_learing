@@ -1,5 +1,4 @@
 from calendar import c
-from email import policy
 from random import sample
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -9,10 +8,11 @@ import torch.nn.functional as F
 from torch.optim import Adam
 
 import wandb
-from agent.common.teacher import PositionPID
+from agent.common.teacher import PositionPID, AttitudePID
 from agent.common.agent import MultiTaskAgent
 from agent.common.policy import GaussianPolicy, GMMPolicy
 from agent.common.util import (
+    linear_schedule,
     update_learning_rate,
     get_sa_pairs,
     grad_false,
@@ -54,6 +54,7 @@ class SFGPIAgent(MultiTaskAgent):
             lr=1e-4,
             lr_schedule=[5e-4, 1e-5],
             policy_lr=5e-4,
+            policy_lr_schedule=[5e-3, 1e-4],
             alpha_lr=3e-4,
             gamma=0.99,
             policy_regularization=1e-3,
@@ -61,10 +62,10 @@ class SFGPIAgent(MultiTaskAgent):
             n_gauss=4,
             multi_step=1,
             updates_per_step=1,
-            prioritized_memory=True,
-            mini_batch_size=128,
-            min_n_experience=int(2048),
             replay_buffer_size=1e6,
+            prioritized_memory=True,
+            mini_batch_size=256,
+            min_n_experience=int(2048),
             td_target_update_interval=1,
             grad_clip=None,
             entropy_tuning=True,
@@ -100,6 +101,7 @@ class SFGPIAgent(MultiTaskAgent):
 
         self.policy_class = config.get("policy_class", "GaussianMixture")
         self.pol_lr = config.get("policy_lr", 1e-3)
+        self.pol_lr_schedule = config.get("policy_lr_schedule", None)
         self.pol_reg = config.get("policy_regularization", 1e-3)
         self.n_gauss = config.get("n_gauss", 5)
 
@@ -107,30 +109,21 @@ class SFGPIAgent(MultiTaskAgent):
         self.grad_clip = config.get("grad_clip", None)
         self.entropy_tuning = config.get("entropy_tuning", True)
 
-        self.task_idx = 0
-        self.prev_ws = []
-        self.w_schedule = config.get("task_schedule", None)
-        self.learn_all_tasks = False
-        if self.w_schedule is not None:
-            self.w = self.w_schedule[self.task_idx]
-        self.update_task(self.w)
-
         self.create_policy = False
         self.share_sf = config.get("share_successor_feature", False)
         self.sfs, self.sf_tars, self.sf_optims = [], [], []
         self.pols, self.pol_optims = [], []
-        self.policy_idx = -1
-        self.create_sf_policy()  # create a policy
-
-        self.success_rate = 0
+        if self.task_schedule is not None:
+            for _ in range(len(self.task_schedule)):
+                self.create_sf_policy()
+        else:
+            self.create_sf_policy()
 
         if self.entropy_tuning:
             self.alpha_lr = config.get("alpha_lr", 3e-4)
-            # target entropy = -|A|
             self.target_entropy = -torch.prod(
                 torch.Tensor(self.env.action_space.shape).to(device)
-            ).item()
-            # optimize log(alpha), instead of alpha
+            ).item()  # target entropy = -|A|
             self.log_alpha = torch.zeros(1, requires_grad=True, device=device)
             self.alpha_bnd = config.get("alpha_bnd", True)
             self.alpha = self.log_alpha.exp()
@@ -147,31 +140,28 @@ class SFGPIAgent(MultiTaskAgent):
             if self.steps > self.total_timesteps:
                 break
 
-    def train_episode(self):
-        if self.task_schedule is not None:
-            self.learn_all_tasks = self.change_task()
-        super().train_episode()
-
     def post_episode_process(self):
         self.update_lr()
         return super().post_episode_process()
 
     def update_lr(self):
+        if self.task_schedule is not None:
+            budget_per_task = self.budget_per_task
+        else:
+            budget_per_task = self.total_timesteps
+
         if self.lr_schedule is not None:
-            if self.task_schedule is not None:
-                n_tasks = len(self.task_schedule)
-                ts_for_each_task = self.total_timesteps / n_tasks
-            else:
-                ts_for_each_task = self.total_timesteps
+            self.lr = linear_schedule(self.steps, budget_per_task, self.lr_schedule)
+            for optim in self.sf_optims:
+                update_learning_rate(optim[0], self.lr)
+                update_learning_rate(optim[1], self.lr)
 
-            n_episodes = ts_for_each_task / self.max_episode_steps
-            increment = (self.lr_schedule[1] - self.lr_schedule[0]) / n_episodes
-            self.lr += increment
+        if self.pol_lr_schedule is not None:
+            self.pol_lr = linear_schedule(
+                self.steps, budget_per_task, self.pol_lr_schedule
+            )
             for optim in self.pol_optims:
-                update_learning_rate(optim, self.lr)
-
-    def evaluate(self):
-        return super().evaluate()
+                update_learning_rate(optim, self.pol_lr)
 
     def explore(self, obs, w):
         acts, qs = self.gpe(obs, w, "explore")
@@ -206,7 +196,7 @@ class SFGPIAgent(MultiTaskAgent):
     def learn(self):
         self.learn_steps += 1
 
-        i = self.policy_idx
+        i = self.task_idx
         sf_optim, sf, sf_tar = self.sf_optims[i], self.sfs[i], self.sf_tars[i]
         pol_optim, pol = self.pol_optims[i], self.pols[i]
 
@@ -244,7 +234,7 @@ class SFGPIAgent(MultiTaskAgent):
         if self.prioritized_memory:
             self.replay_buffer.update_priority(indices, errors.detach().cpu().numpy())
 
-        if self.learn_steps % self.log_interval * 10 == 0:
+        if self.learn_steps % self.log_interval * 100 == 0:
             metrics = {
                 "loss/SF0": sf_loss[0].detach().item(),
                 "loss/SF1": sf_loss[1].detach().item(),
@@ -255,7 +245,6 @@ class SFGPIAgent(MultiTaskAgent):
                 "state/entropy": entropy.detach().mean().item(),
                 "state/lr": self.lr,
                 "task/task_idx": self.task_idx,
-                "task/policy_idx": self.policy_idx,
             }
             w = ts2np(self.w)
             for i in range(w.shape[0]):
@@ -274,20 +263,13 @@ class SFGPIAgent(MultiTaskAgent):
         mean_sf1 = cur_sf1.detach().mean().item()
 
         if self.normalize_critic:
-            # apply critic normalization trick,
-            # ref: Yang-Gao, Reinforcement Learning from Imperfect Demonstrations
             _, sfv = self.calc_target_sfv(obs, features, dones, sf_target, pol)
-            grad_sf0 = torch.autograd.grad(
-                (cur_sf0 - sfv),
-                sf.SF0.parameters(),
-                grad_outputs=(cur_sf0 - target_sf) * weights,
+            grad_sf0 = self.calc_normalized_grad(
+                sf.SF0, weights, cur_sf0, target_sf, sfv
             )
-            grad_sf1 = torch.autograd.grad(
-                (cur_sf1 - sfv),
-                sf.SF1.parameters(),
-                grad_outputs=(cur_sf1 - target_sf) * weights,
+            grad_sf1 = self.calc_normalized_grad(
+                sf.SF1, weights, cur_sf1, target_sf, sfv
             )
-            # multiply weights and differentiate later to apply gradient
             sf0_loss = self.calc_surrogate_loss(sf.SF0, grad_sf0)
             sf1_loss = self.calc_surrogate_loss(sf.SF1, grad_sf1)
         else:
@@ -361,7 +343,18 @@ class SFGPIAgent(MultiTaskAgent):
 
         return target_sf, next_sfv
 
+    def calc_normalized_grad(self, sf, weights, cur_sf, target_sf, sfv):
+        # apply critic normalization trick,
+        # ref: Yang-Gao, Reinforcement Learning from Imperfect Demonstrations
+        grad_sf = torch.autograd.grad(
+            (cur_sf - sfv),
+            sf.parameters(),
+            grad_outputs=(cur_sf - target_sf) * weights,
+        )
+        return grad_sf
+
     def calc_surrogate_loss(self, net, gradient):
+        # multiply weights and differentiate later to apply gradient
         sur_loss = torch.sum(
             torch.stack(
                 [torch.sum(w * g.detach()) for w, g in zip(net.parameters(), gradient)],
@@ -413,7 +406,7 @@ class SFGPIAgent(MultiTaskAgent):
 
     def calc_priority_error(self, batch):
         (obs, features, act, rewards, next_obs, dones) = batch
-        i = self.policy_idx
+        i = self.task_idx
         with torch.no_grad():
             cur_sf0, cur_sf1 = self.get_cur_sf(self.sfs[i], obs, act)
             target_sf, _ = self.get_target_sf(
@@ -432,9 +425,8 @@ class SFGPIAgent(MultiTaskAgent):
             sf, sf_target, sf_optimizer = self.create_sf()
 
         policy, policy_optimizer = self.create_pol()
-
         self.create_policy = True
-        self.policy_idx += 1
+
         self.sfs.append(sf)
         self.sf_tars.append(sf_target)
         self.sf_optims.append(sf_optimizer)
@@ -484,39 +476,10 @@ class SFGPIAgent(MultiTaskAgent):
         policy_optimizer = Adam(policy.parameters(), lr=self.pol_lr)
         return policy, policy_optimizer
 
-    def change_task(self):
-        """if a current task is mastered then update task according to schedule"""
-        if self.master_current_task():
-            if self.task_idx < len(self.w_schedule) - 1:
-
-                self.task_idx += 1
-                w = self.w_schedule[self.task_idx]
-                old_w = self.w_schedule[self.task_idx - 1]
-                self.prev_ws.append(old_w)
-
-                self.update_task(w)
-
-                if self.create_new_pol(w):
-                    self.create_sf_policy()
-            else:
-                print("no more task to learn")
-                return True  # master all tasks
-
-        return False
-
-    def master_current_task(self):
-        master = False
-        if self.success_rate > 0.9:
-            master = True
-            self.success_rate = 0
-
-        return master
-
     def update_task(self, w):
-        """update task"""
-        self.w = torch.tensor(w, dtype=torch.float32).to(device)
-        self.env.w = w
-        assert self.w.shape == (self.feature_dim,)
+        super().update_task(w)
+        if self.create_new_pol(w):
+            self.create_sf_policy()
 
     def create_new_pol(self, w):
         """should we create new set of policies"""
@@ -550,36 +513,37 @@ class TEACHER_SFGPI(SFGPIAgent):
         self.n_teacher_episodes = config.get("n_teacher_episodes", 60)
         self.pretrain_sf_epochs = config.get("pretrain_sf_epochs", 1e4)
 
-        self.teacher = PositionPID()
+        self.teachers = [AttitudePID(), PositionPID()]
         self.train_tsf = config.get("train_tsf", True)
 
-        if self.share_sf:
-            self.tsf = self.sfs[0]
-            self.tsf_tar = self.sf_tars[0]
-            self.tsf_optim = self.sf_optims[0]
-        else:
-            self.tsf, self.tsf_tar, self.tsf_optim = self.create_sf()
+        self.tsfs, self.tsf_tars, self.tsf_optims = [], [], []
+        for _ in range(len(self.teachers)):
+            self.create_teacher_sfs()
 
-        self.teacher.reset()
+        self.reset_teachers()
         self.stu_act_cnt = 0
         self.tea_act_cnt = 0
+        self.teacher_idx = 0
 
     def run(self):
         if self.train_tsf:
-            for i in range(self.n_teacher_episodes):
-                print(f"========= teacher sf episode {i} =========")
-                self.train_episode()
+            for i in range(len(self.teachers)):
+                self.teacher_idx = i
+                for j in range(self.n_teacher_episodes):
+                    print(f"========= teacher{i} sf episode {j} =========")
+                    self.train_episode()
             self.pretrain_student()
         self.train_tsf = False
         return super().run()
 
     def pretrain_student(self):
-        hard_update(self.sfs[0], self.tsf)
-        hard_update(self.sf_tars[0], self.tsf_tar)
-        self.pretrain_pol(self.pretrain_sf_epochs)
+        hard_update(self.sfs[0], self.tsfs[0])
+        hard_update(self.sf_tars[0], self.tsf_tars[0])
+        self.pretrain_pol(0, self.pretrain_sf_epochs)
 
-    def pretrain_pol(self, pretrain_epochs=1e3):
-        print("start pretraing policy")
+    def pretrain_pol(self, pol_idx=0, pretrain_epochs=1e3):
+        print(f"start pretraing policy{pol_idx}")
+        i = pol_idx
         for epoch in range(int(pretrain_epochs)):
             if self.prioritized_memory:
                 batch, indices, weights = self.replay_buffer.sample(
@@ -590,9 +554,9 @@ class TEACHER_SFGPI(SFGPIAgent):
                 weights = 1
 
             pol_loss, entropy = self.calc_pol_loss(
-                batch, self.sf_tars[0], self.pols[0], weights
+                batch, self.sf_tars[i], self.pols[i], weights
             )
-            update_params(self.pol_optims[0], self.pols[0], pol_loss, self.grad_clip)
+            update_params(self.pol_optims[i], self.pols[i], pol_loss, self.grad_clip)
 
             if self.entropy_tuning:
                 entropy_loss = self.calc_entropy_loss(entropy, weights)
@@ -604,57 +568,65 @@ class TEACHER_SFGPI(SFGPIAgent):
             if epoch % self.log_interval == 0:
                 with torch.no_grad():
                     (obs, _, _, _, _, _) = batch
-                    _, _, act = self.pols[0](obs)
-                    _, _, tact = self.teacher(obs)
+                    _, _, act = self.pols[i](obs)
+                    _, _, tact = self.teachers[i](obs)
 
-                    q = self.calc_q_from_sf(obs, act, self.sf_tars[0], self.w)
-                    tq = self.calc_q_from_sf(obs, tact, self.sf_tars[0], self.w)
+                    q = self.calc_q_from_sf(obs, act, self.sf_tars[i], self.w)
+                    tq = self.calc_q_from_sf(obs, tact, self.sf_tars[i], self.w)
 
                 metrics = {
                     "pretrain/loss": pol_loss,
                     "pretrain/q_value": q.mean().item(),
                     "pretrain/tq_value": tq.mean().item(),
+                    "pretrain/act": act,
+                    "pretrain/tact": tact,
                 }
                 wandb.log(metrics)
 
     def explore(self, obs, w):
         acts, qs = self.gpe(obs, w, "explore")
-        tact, tq = self.tgpe(obs, w)
-        acts.append(tact)
-        qs.append(tq)
+        tacts, tqs = self.tgpe(obs, w)
+        acts.extend(tacts)
+        qs.extend(tqs)
         act = self.gpi(acts, qs)
         return act
 
     def exploit(self, obs, w):
         acts, qs = self.gpe(obs, w, "exploit")
-        tact, tq = self.tgpe(obs, w)
-        acts.append(tact)
-        qs.append(tq)
+        tacts, tqs = self.tgpe(obs, w)
+        acts.extend(tacts)
+        qs.extend(tqs)
         act = self.gpi(acts, qs)
 
-        if act in acts:
-            self.stu_act_cnt += 1
-        else:
+        if act in tacts:  # TODO:
             self.tea_act_cnt += 1
+        else:
+            self.stu_act_cnt += 1
 
         st_act_ratio = self.stu_act_cnt / (self.stu_act_cnt + self.tea_act_cnt)
         metrics = {
-            "teacher/teacher_q": tq,  # TODO: consider more teachers case
-            "teacher/student_q": qs[0],  # TODO: consider more students case
-            "teacher/student_teacher_act_ratio": st_act_ratio,
+            "evaluate/teacher_q0": tqs[0],  # TODO: consider more teachers case
+            "evaluate/teacher_q1": tqs[1],  # TODO: consider more teachers case
+            "evaluate/student_q0": qs[0],  # TODO: consider more students case
+            "evaluate/student_teacher_act_ratio": st_act_ratio,
         }
         wandb.log(metrics)
 
         return act
 
     def tgpe(self, obs, w):
-        tact = self.teacher.act(obs)
-        tq = self.calc_q_from_sf(obs, tact, self.sf_tars[0], w)
-        return tact, tq
+        tacts, tqs = [], []
+
+        tacts = [tea.act(obs) for tea in self.teachers]
+        tqs = [
+            self.calc_q_from_sf(obs, tacts[i], self.tsf_tars[i], w)
+            for i in range(len(self.tsf_tars))
+        ]
+        return tacts, tqs
 
     def act(self, obs, mode="explore"):
         if self.train_tsf:
-            action = ts2np(self.teacher.act(np2ts(obs)))
+            action = ts2np(self.teachers[self.teacher_idx].act(np2ts(obs)))
         else:
             action = super().act(obs, mode)
         return action
@@ -677,37 +649,55 @@ class TEACHER_SFGPI(SFGPIAgent):
             batch = self.replay_buffer.sample(self.mini_batch_size)
             weights = 1
 
-        (
-            tsf_loss,
-            errors,
-            mean_tsf,
-            target_tsf,
-        ) = self.calc_sf_loss(batch, self.tsf, self.tsf_tar, self.teacher, weights)
+        i = self.teacher_idx
+        (tsf_loss, errors, mean_tsf, target_tsf,) = self.calc_sf_loss(
+            batch, self.tsfs[i], self.tsf_tars[i], self.teachers[i], weights
+        )
 
-        update_params(self.tsf_optim[0], self.tsf.SF0, tsf_loss[0], self.grad_clip)
-        update_params(self.tsf_optim[1], self.tsf.SF1, tsf_loss[1], self.grad_clip)
+        update_params(
+            self.tsf_optims[i][0], self.tsfs[i].SF0, tsf_loss[0], self.grad_clip
+        )
+        update_params(
+            self.tsf_optims[i][1], self.tsfs[i].SF1, tsf_loss[1], self.grad_clip
+        )
 
         if self.prioritized_memory:
             self.replay_buffer.update_priority(indices, errors.detach().cpu().numpy())
 
         if self.learn_steps % self.log_interval == 0:
             metrics = {
-                "teacher/tSF0_loss": tsf_loss[0].detach().item(),
-                "teacher/tSF1_loss": tsf_loss[1].detach().item(),
-                "teacher/mean_tSF0": mean_tsf[0],
-                "teacher/mean_tSF1": mean_tsf[1],
-                "teacher/target_tsf": target_tsf.detach().mean().item(),
+                "pretrain/tSF0_loss": tsf_loss[0].detach().item(),
+                "pretrain/tSF1_loss": tsf_loss[1].detach().item(),
+                "pretrain/mean_tSF0": mean_tsf[0],
+                "pretrain/mean_tSF1": mean_tsf[1],
+                "pretrain/target_tsf": target_tsf.detach().mean().item(),
             }
             w = ts2np(self.w)
             for i in range(w.shape[0]):
                 metrics[f"task/{i}"] = w[i]
             wandb.log(metrics)
 
+    def create_teacher_sfs(self):
+        if self.share_sf:
+            self.tsf = self.sfs[0]
+            self.tsf_tar = self.sf_tars[0]
+            self.tsf_optim = self.sf_optims[0]
+        else:
+            self.tsf, self.tsf_tar, self.tsf_optim = self.create_sf()
+
+        self.tsfs.append(self.tsf)
+        self.tsf_tars.append(self.tsf_tar)
+        self.tsf_optims.append(self.tsf_optim)
+
     def reset_env(self):
-        self.teacher.reset()
+        self.reset_teachers()
         self.stu_act_cnt = 0
         self.tea_act_cnt = 0
         return super().reset_env()
+
+    def reset_teachers(self):
+        for pol in self.teachers:
+            pol.reset()
 
 
 if __name__ == "__main__":
@@ -771,8 +761,8 @@ if __name__ == "__main__":
                 "constraint": {
                     "survive": np.array([1]),
                     "action_cost": np.array([0.1]),
-                    "pos_ubnd_cost": np.array([0.0, 0.0, 0.1]),
-                    "pos_lbnd_cost": np.array([0.0, 0.0, 0.1]),
+                    "pos_ubnd_cost": np.array([0.0, 0.0, 0.5]),
+                    "pos_lbnd_cost": np.array([0.0, 0.0, 0.5]),
                 },
                 "success": {
                     "pos": np.array([0.0, 0.0, 10.0]),
@@ -789,16 +779,16 @@ if __name__ == "__main__":
             env_kwargs=env_kwargs,
             render=render,
             task_schedule=None,
-            n_teacher_episodes=10,
-            min_batch_size=int(256),
-            min_n_experience=int(2048),
+            n_teacher_episodes=1,  # 10
+            min_batch_size=int(2),  # 256
+            min_n_experience=int(10),  # 2048
             multi_step=1,
-            updates_per_step=5,
+            updates_per_step=2,
             n_particles=64,
             n_gauss=4,
             policy_class="GaussianMixture",
-            net_kwargs={"value_sizes": [128, 128], "policy_sizes": [64, 64]},
-            pretrain_sf_epochs=5e3,
+            net_kwargs={"value_sizes": [128, 128], "policy_sizes": [32, 32]},
+            pretrain_sf_epochs=10,  # 5e4
             entropy_tuning=True,
             normalize_critic=True,
             compute_target_by_sfv=True,

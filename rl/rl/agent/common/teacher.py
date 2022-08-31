@@ -141,9 +141,8 @@ class AttitudePID:
         ).unsqueeze(1)
         z_ctrl = torch.zeros_like(roll_ctrl)
 
-        ctrl = torch.cat([roll_ctrl, pitch_ctrl, yaw_ctrl, z_ctrl])
-        action = torch.clip(ctrl, -1, 1)
-        return action
+        ctrl = torch.cat([roll_ctrl, pitch_ctrl, yaw_ctrl, z_ctrl], 1)
+        return torch.clip(ctrl, -1, 1)
 
     def unpack_teacher_obs(self, obs: torch.Tensor):
         if obs.dim() == 1:

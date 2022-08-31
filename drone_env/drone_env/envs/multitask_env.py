@@ -280,21 +280,21 @@ class MultiTaskEnv(BaseEnv):
         return time or success or fail, {"time": time, "success": success, "fail": fail}
 
     def check_success(self, obs_info):
-        ang_diff = self.tasks["tracking"]["ang_diff"]
-        vel_diff = self.tasks["tracking"]["vel_diff"]
-        pos_diff = self.tasks["tracking"]["pos_diff"]
+        w_pos_diff = np.array(self.tasks["tracking"]["pos_diff"])
+        w_vel_diff = np.array(self.tasks["tracking"]["vel_diff"])
+        w_ang_diff = np.array(self.tasks["tracking"]["ang_diff"])
 
         success_bnd = np.array([0.0, 0.0, 0.0])
 
-        if (pos_diff > 0).any():
+        if (w_pos_diff > 0).any():
             value = obs_info["proc_dict"]["pos_diff"]
-            diff = pos_diff
-        elif (vel_diff > 0).any():
+            diff = w_pos_diff
+        elif (w_vel_diff > 0).any():
             value = obs_info["proc_dict"]["vel_diff"]
-            diff = vel_diff
-        elif (ang_diff > 0).any():
+            diff = w_vel_diff
+        elif (w_ang_diff > 0).any():
             value = obs_info["proc_dict"]["ang_diff"]
-            diff = ang_diff
+            diff = w_ang_diff
         else:
             return False
 
@@ -305,7 +305,7 @@ class MultiTaskEnv(BaseEnv):
                 0.1 * (diff[2] > 0),
             ]
         )
-        success_bnd[success_bnd == 0] += 1
+        success_bnd[success_bnd == 0.0] += 1
         success = self.time_in_success_region(
             value,
             -success_bnd,
@@ -319,7 +319,7 @@ class MultiTaskEnv(BaseEnv):
         else:
             self.succecss_timer = 0
 
-        if self.succecss_timer > time * self.sim_freq:
+        if self.succecss_timer > time * self.config["policy_frequency"]:
             return True
 
         return False
