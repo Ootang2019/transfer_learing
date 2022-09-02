@@ -1,7 +1,7 @@
 from calendar import c
 from random import sample
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-
+import copy
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -53,9 +53,9 @@ class SFGPIAgent(MultiTaskAgent):
             tau=5e-3,
             alpha=0.2,
             lr=1e-4,
-            lr_schedule=[5e-4, 1e-5],
+            lr_schedule=np.array([5e-4, 1e-5]),
             policy_lr=5e-4,
-            policy_lr_schedule=[5e-3, 1e-4],
+            policy_lr_schedule=np.array([5e-3, 1e-4]),
             alpha_lr=3e-4,
             gamma=0.99,
             policy_regularization=1e-3,
@@ -77,6 +77,7 @@ class SFGPIAgent(MultiTaskAgent):
             policy_class="GaussianMixture",
             net_kwargs={"value_sizes": [64, 64], "policy_sizes": [32, 32]},
             task_schedule=None,
+            train_ntime_per_task=3,
             eval=True,
             eval_interval=100,
             log_interval=5,
@@ -146,22 +147,28 @@ class SFGPIAgent(MultiTaskAgent):
         self.update_lr()
         return super().post_episode_process()
 
+    def post_all_tasks_process(self):
+        self.reward_scale *= 1.5
+        self.alpha_bnd *= 0.9
+        self.lr_schedule *= 0.9
+        self.pol_lr_schedule *= 0.9
+        return super().post_all_tasks_process()
+
     def update_lr(self):
         if self.task_schedule is not None:
             budget_per_task = self.budget_per_task
         else:
             budget_per_task = self.total_timesteps
 
+        steps = self.steps % budget_per_task
         if self.lr_schedule is not None:
-            self.lr = linear_schedule(self.steps, budget_per_task, self.lr_schedule)
+            self.lr = linear_schedule(steps, budget_per_task, self.lr_schedule)
             for optim in self.sf_optims:
                 update_learning_rate(optim[0], self.lr)
                 update_learning_rate(optim[1], self.lr)
 
         if self.pol_lr_schedule is not None:
-            self.pol_lr = linear_schedule(
-                self.steps, budget_per_task, self.pol_lr_schedule
-            )
+            self.pol_lr = linear_schedule(steps, budget_per_task, self.pol_lr_schedule)
             for optim in self.pol_optims:
                 update_learning_rate(optim, self.pol_lr)
 
@@ -512,6 +519,9 @@ class TEACHER_SFGPI(SFGPIAgent):
         self.reset_teachers()
         self.stu_act_cnt = 0
         self.tea_act_cnt = 0
+        self.sq = []
+        self.tq0 = []
+        self.tq1 = []
         self.tidx = 0
 
         self.origin_goal = []
@@ -520,21 +530,22 @@ class TEACHER_SFGPI(SFGPIAgent):
     def run(self):
         if self.enable_tsf:
             for i in range(len(self.teachers)):
+                self.enable_reset_ctrl = True if i == 0 else False
                 self.tidx = i
                 for j in range(self.n_teacher_episodes):
-                    print(f"========= train teacher_sf {i} steps {j} =========")
+                    print(f"========= train teacher_sf {i} episode {j} =========")
                     self.train_episode()
+                    self.steps = 0  # reset steps spent by training teacher sf
 
             for i in range(len(self.pols)):
                 print(f"========= pretrain student policy {i}  =========")
                 self.pretrain_student(i)
 
         self.enable_tsf = False
-        self.steps = 0  # reset steps spent by training teacher sf
         return super().run()
 
     def pretrain_student(self, idx=0):
-        for i in range(len(self.tsfs)):
+        for i in range(len(self.tsfs)):  # TODO: teacher more than student case
             hard_update(self.sfs[i], self.tsfs[i])
             hard_update(self.sf_tars[i], self.tsf_tars[i])
         self.pretrain_pol(idx, self.pretrain_sf_epochs)
@@ -568,12 +579,16 @@ class TEACHER_SFGPI(SFGPIAgent):
                 with torch.no_grad():
                     (obs, _, _, _, _, _) = batch
                     _, _, act = self.pols[i](obs)
+                    tact0 = self.teachers[0].act(obs)
+                    tact1 = self.teachers[1].act(obs)
                     q = self.calc_q_from_sf(obs, act, self.sf_tars[i], w)
 
                 metrics = {
-                    "pretrain/loss": pol_loss,
-                    "pretrain/q_value": q.mean().item(),
-                    "pretrain/act": act,
+                    f"pretrain/loss{i}": pol_loss,
+                    f"pretrain/q_value{i}": q.mean().item(),
+                    f"pretrain/act{i}": act,
+                    f"pretrain/tact0": tact0,
+                    f"pretrain/tact1": tact1,
                 }
                 wandb.log(metrics)
 
@@ -588,29 +603,37 @@ class TEACHER_SFGPI(SFGPIAgent):
     def exploit(self, obs, w):
         acts, qs = self.gpe(obs, w, "exploit")
         tacts, tqs = self.tgpe(obs, w)
+
+        # log qs in wandb
+        self.sq.append(qs)
+        self.tq0.append(tqs[0])
+        self.tq1.append(tqs[1])
+
         acts.extend(tacts)
         qs.extend(tqs)
         act = self.gpi(acts, qs)
 
-        if act in tacts:  # TODO:
+        if act in torch.stack(tacts):
             self.tea_act_cnt += 1
         else:
             self.stu_act_cnt += 1
 
-        st_act_ratio = self.stu_act_cnt / (self.stu_act_cnt + self.tea_act_cnt)
+        return act
+
+    def log_evaluation(self, episodes, returns, success):
+        st_act_ratio = self.stu_act_cnt / (self.stu_act_cnt + self.tea_act_cnt + 1)
         metrics = {
-            "evaluate/teacher_q0": tqs[0],  # TODO: consider more teachers case
-            "evaluate/teacher_q1": tqs[1],  # TODO: consider more teachers case
-            "evaluate/student_q0": qs[0],  # TODO: consider more students case
+            "evaluate/teacher_q0": torch.mean(torch.tensor(self.tq0)),
+            "evaluate/teacher_q1": torch.mean(torch.tensor(self.tq1)),
+            "evaluate/student_q0": torch.mean(torch.tensor(self.sq)),
             "evaluate/student_teacher_act_ratio": st_act_ratio,
         }
         wandb.log(metrics)
 
-        return act
+        return super().log_evaluation(episodes, returns, success)
 
     def tgpe(self, obs, w):
         tacts, tqs = [], []
-
         tacts = [tea.act(obs) for tea in self.teachers]
         tqs = [
             self.calc_q_from_sf(obs, tacts[i], self.tsf_tars[i], w)
@@ -643,6 +666,8 @@ class TEACHER_SFGPI(SFGPIAgent):
             self.env.target_type.angvel_cmd_data,
         ]
         self.env.target_type.pos_cmd_data = np.array([0, 0, -25])
+        self.reset_teachers()
+        self.reset_ctrl.reset()
         self.safe_goal_isset = True
 
     def set_origin_goal(self):
@@ -660,48 +685,28 @@ class TEACHER_SFGPI(SFGPIAgent):
         if self.enable_reset_ctrl:
             if self.hard_reset_condition(obs):
                 return True
-
-            # risk = self.measure_risk(obs)
-            # if risk > self.risk_threshold:
-            #     return True
-
         return False
 
     def hard_reset_condition(self, obs):
         obs_info = self.env.obs_info
         pos_lbnd = self.env.pos_lbnd + 5
         pos_ubnd = self.env.pos_ubnd - 5
-        vel_ubnd = np.array([2, 2, 1.5])
+        vel_ubnd = np.array([2.5, 2.5, 2.5])
         ang_bnd = 0.015
 
         if (obs_info["obs_dict"]["position"] <= pos_lbnd).any():
-            print("trigger position lower bnd, engage reset ctrl")
-            print("current position", obs_info["obs_dict"]["position"])
-            print("position limit", pos_lbnd)
             return True
         if (obs_info["obs_dict"]["position"] >= pos_ubnd).any():
-            print("trigger position upper bnd, engage reset ctrl")
-            print("current position", obs_info["obs_dict"]["position"])
-            print("position limit", pos_ubnd)
             return True
 
         if (np.abs(obs_info["obs_dict"]["velocity"]) >= vel_ubnd).any():
-            print("trigger velocity uppder bnd, engage reset ctrl")
-            print("current velocity", obs_info["obs_dict"]["velocity"])
-            print("velocity limit", vel_ubnd)
             return True
 
         roll = obs_info["obs_dict"]["angle"][0]
         if (roll > ang_bnd) or (roll < -ang_bnd):
-            print("trigger roll ctrl bnd, engage reset ctrl")
-            print("current roll angle", roll)
-            print("angle limit", ang_bnd)
             return True
         pitch = obs_info["obs_dict"]["angle"][1]
         if (pitch > ang_bnd) or (pitch < -ang_bnd):
-            print("trigger pitch ctrl bnd, engage reset ctrl")
-            print("current pitch angle", pitch)
-            print("angle limit", ang_bnd)
             return True
 
         return False
@@ -802,51 +807,19 @@ if __name__ == "__main__":
     env_kwargs = {}
     if env == "multitask-v0":
         env_config = {
-            "DBG": False,
-            "duration": 1000,
             "simulation": {
                 "gui": render,
                 "enable_meshes": True,
                 "auto_start_simulation": auto_start_simulation,
                 "position": (0, 0, 25),  # initial spawned position
             },
-            "observation": {
-                "DBG_ROS": False,
-                "DBG_OBS": False,
-                "noise_stdv": 0.0,
-                "scale_obs": True,
-                "include_raw_state": True,
-                "bnd_constraint": True,
-            },
+            "observation": {"noise_stdv": 0.002},
             "action": {
                 "DBG_ACT": False,
-                "act_noise_stdv": 0.01,
-                "thrust_range": [-0.25, 0.25],
+                "act_noise_stdv": 0.0,
+                "thrust_range": [-0.2, 0.2],
             },
-            "target": {
-                "type": "FixedGoal",
-                "DBG_ROS": False,
-            },
-            "tasks": {
-                "tracking": {
-                    "ori_diff": np.array([0.0, 0.0, 0.0, 0.0]),
-                    "ang_diff": np.array([1.0, 1.0, 1.0]),
-                    "angvel_diff": np.array([0.0, 0.0, 0.0]),
-                    "pos_diff": np.array([0.0, 0.0, 1.0]),
-                    "vel_diff": np.array([0.0, 0.0, 1.0]),
-                    "vel_norm_diff": np.array([0.0]),
-                },
-                "constraint": {
-                    "survive": np.array([1]),
-                    "action_cost": np.array([0.1]),
-                    "pos_ubnd_cost": np.array([0.0, 0.0, 0.5]),
-                    "pos_lbnd_cost": np.array([0.0, 0.0, 0.5]),
-                },
-                "success": {
-                    "pos": np.array([0.0, 0.0, 10.0]),
-                    "fail": np.array([-10.0]),
-                },
-            },
+            "target": {"type": "FixedGoal"},
         }
         env_kwargs = {"config": env_config}
 
@@ -857,20 +830,25 @@ if __name__ == "__main__":
             env_kwargs=env_kwargs,
             render=render,
             multi_step=1,
-            updates_per_step=2,
+            updates_per_step=3,
             n_particles=64,
-            n_gauss=4,
+            n_gauss=5,
             n_teacher_episodes=10,  # 10
+            enable_reset_controller=False,
             min_batch_size=int(256),  # 256
             min_n_experience=int(2048),  # 2048
             total_timesteps=1e6,  # 1e6
-            pretrain_sf_epochs=1e4,  # 1e4
+            pretrain_sf_epochs=1e3,  # 1e3
+            eval_interval=10,  # 10
+            train_ntime_per_task=10,
             entropy_tuning=True,
             normalize_critic=True,
             compute_target_by_sfv=True,
-            task_schedule=get_task_schedule(),
             policy_class="GaussianMixture",
-            net_kwargs={"value_sizes": [128, 128], "policy_sizes": [32, 32]},
+            net_kwargs={"value_sizes": [128, 128], "policy_sizes": [16, 16]},
+            task_schedule=get_task_schedule(
+                ["roll", "pitch", "yaw", "att", "z", "xz", "yz", "xyz"]
+            ),
         )
     )
 

@@ -164,6 +164,7 @@ class ContinuousAction(ROSActionType):
         self.thrust_range = thrust_range
 
         self.cur_act = self.init_act = np.zeros(self.act_dim)
+        self.prev_act = self.cur_act.copy()
 
     def space(self) -> spaces.Box:
         return spaces.Box(
@@ -193,7 +194,8 @@ class ContinuousAction(ROSActionType):
         Args:
             action (np.ndarray): agent action
         """
-        self.cur_act = action
+        self.prev_act = self.cur_act.copy()
+        self.cur_act = action.copy()
         processed_action = self.process_action(action, self.act_noise_stdv)
 
         act_msg = Actuators()
@@ -206,25 +208,47 @@ class ContinuousAction(ROSActionType):
             print("[ Action ] act: action:", action)
             print("[ Action ] act: processed_action:", processed_action)
 
-    def action_rew(self, scale=0.5):
+    def action_rew(self, scale=0.001):
         """calculate action reward to penalize using motors
 
         Args:
-            action ([np.ndarray]): agent action
+            action ([np.ndarray]): agent action [-1, 1]
             scale (float, optional): reward scale. Defaults to 0.5.
 
         Returns:
             [float]: action reward
         """
         motors = self.get_cur_act()
-        motors_rew = np.exp(-scale * np.linalg.norm(motors))
-        # motors_rew = -scale * np.linalg.norm(motors)
+        motors_rew = -scale * np.linalg.norm(motors)
         return motors_rew
+
+    def action_cont_rew(self, scale=0.1):
+        """calculate action continuety reward to penalize motors discontinuous
+
+        Args:
+            action ([np.ndarray]): agent action [-1, 1]
+            scale (float, optional): reward scale. Defaults to 0.5.
+
+        Returns:
+            [float]: action reward
+        """
+
+        motors = self.get_cur_act()
+        prev_motors = self.get_prev_act()
+        diff = -scale * np.linalg.norm(motors - prev_motors)
+        return diff
 
     def get_cur_act(self):
         """get current action"""
         cur_act = self.cur_act.copy()
         return cur_act.reshape(
+            self.act_dim,
+        )
+
+    def get_prev_act(self):
+        """get current action"""
+        prev_act = self.prev_act.copy()
+        return prev_act.reshape(
             self.act_dim,
         )
 
@@ -270,7 +294,8 @@ class ContinuousVirtualAction(ContinuousAction):
             action (np.ndarray): agent action
         """
         processed_action = self.process_action(action, self.act_noise_stdv)
-        self.cur_act = processed_action
+        self.prev_act = self.cur_act.copy()
+        self.cur_act = processed_action.copy()
 
         act_msg = Actuators()
         act_msg.header.stamp = rospy.Time.now()

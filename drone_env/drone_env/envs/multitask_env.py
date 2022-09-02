@@ -51,7 +51,8 @@ class MultiTaskEnv(BaseEnv):
                 "duration": 1500,  # [steps]
                 "simulation_frequency": 50,  # [hz]
                 "policy_frequency": 25,  # [hz]
-                "success_threshhold": 1,  # [meters]
+                "position_success_threshhold": 1,  # [meters]
+                "attitude_success_threshhold": 0.05,  # [rad]
                 "tasks": {
                     "tracking": {
                         "ori_diff": np.array([1.0, 1.0, 1.0, 1.0]),
@@ -63,11 +64,12 @@ class MultiTaskEnv(BaseEnv):
                     },
                     "constraint": {
                         "survive": np.array([1.0]),
-                        "action_cost": np.array([0.1]),
+                        "action_cost": np.array([0.1, 0.1]),
                         "pos_ubnd_cost": np.array([0.1, 0.1, 0.1]),  # x,y,z
                         "pos_lbnd_cost": np.array([0.1, 0.1, 0.1]),  # x,y,z
                     },
                     "success": {
+                        "att": np.array([10.0, 10.0, 10.0]),
                         "pos": np.array([10.0, 10.0, 10.0]),
                         "fail": np.array([-10.0]),
                     },  # x,y,z
@@ -211,7 +213,9 @@ class MultiTaskEnv(BaseEnv):
         done, _ = self._is_terminal(obs_info)
 
         survive = np.array([done]).astype(np.float32)
-        act = np.array([self.action_type.action_rew()])
+        act = np.array(
+            [self.action_type.action_rew(), self.action_type.action_cont_rew()]
+        )
         pos_bnd = self.calc_dist_to_pos_bnd(pos, constr_dict)
         return np.concatenate([survive, act, pos_bnd])
 
@@ -231,9 +235,30 @@ class MultiTaskEnv(BaseEnv):
         )
         pos_success = self.position_task_successs(pos, goal_pos)
 
+        ang, goal_ang = (
+            obs_info["obs_dict"]["angle"],
+            obs_info["goal_dict"]["angle"],
+        )
+        att_success = self.attitude_task_successs(ang, goal_ang)
+
         _, ter_info = self._is_terminal(obs_info)
-        fail = np.array([ter_info["fail"]]).astype(float)
-        return np.concatenate([pos_success, fail])
+        fail = -np.array([ter_info["fail"]]).astype(float)
+        return np.concatenate([att_success, pos_success, fail])
+
+    def attitude_task_successs(self, ang: np.array, goal_ang: np.array) -> np.array:
+        """task success if distance to goal is less than sucess_threshhold
+
+        Args:
+            pos ([np.array]): [position of machine]
+            goal_pos ([np.array]): [position of goal]
+
+        Returns:
+            [np.array]: [1.0 if success, otherwise 0.0]
+        """
+        ref_ang = np.abs(ang[0:3] - goal_ang[0:3])
+        return np.array(ref_ang <= self.config["attitude_success_threshhold"]).astype(
+            float
+        )
 
     def position_task_successs(self, pos: np.array, goal_pos: np.array) -> np.array:
         """task success if distance to goal is less than sucess_threshhold
@@ -246,7 +271,9 @@ class MultiTaskEnv(BaseEnv):
             [np.array]: [1.0 if success, otherwise 0.0]
         """
         ref_pos = np.abs(pos[0:3] - goal_pos[0:3])
-        return np.array(ref_pos <= self.config["success_threshhold"]).astype(float)
+        return np.array(ref_pos <= self.config["position_success_threshhold"]).astype(
+            float
+        )
 
     def _is_terminal(self, obs_info: dict) -> bool:
         """if episode terminate
@@ -279,7 +306,7 @@ class MultiTaskEnv(BaseEnv):
 
         return time or success or fail, {"time": time, "success": success, "fail": fail}
 
-    def check_success(self, obs_info):
+    def check_success(self, obs_info, success_region=0.1):
         w_pos_diff = np.array(self.tasks["tracking"]["pos_diff"])
         w_vel_diff = np.array(self.tasks["tracking"]["vel_diff"])
         w_ang_diff = np.array(self.tasks["tracking"]["ang_diff"])
@@ -298,19 +325,9 @@ class MultiTaskEnv(BaseEnv):
         else:
             return False
 
-        success_bnd = np.array(
-            [
-                0.1 * (diff[0] > 0),
-                0.1 * (diff[1] > 0),
-                0.1 * (diff[2] > 0),
-            ]
-        )
+        success_bnd = success_region * np.array([diff[0] > 0, diff[1] > 0, diff[2] > 0])
         success_bnd[success_bnd == 0.0] += 1
-        success = self.time_in_success_region(
-            value,
-            -success_bnd,
-            success_bnd,
-        )
+        success = self.time_in_success_region(value, -success_bnd, success_bnd)
         return success
 
     def time_in_success_region(self, val, val_lbnd, val_ubnd, time=5):
@@ -369,7 +386,7 @@ if __name__ == "__main__":
         "action": {
             "DBG_ACT": True,
             "act_noise_stdv": 0.0,
-            "thrust_range": [-0.2, 0.2],
+            "thrust_range": [-1, 1],
         },
         "target": {
             "DBG_ROS": False,
@@ -379,9 +396,10 @@ if __name__ == "__main__":
     def env_step():
         env = ENV(env_kwargs)
         env.reset()
+        action = env.action_space.sample()
+        action = np.zeros_like(action)
         for _ in range(100000):
-            action = env.action_space.sample()
-            action = 1 * np.zeros_like(action)
+            action += 0.02 * np.ones_like(action)
             obs, reward, terminal, info = env.step(action)
 
         GazeboConnection().unpause_sim()

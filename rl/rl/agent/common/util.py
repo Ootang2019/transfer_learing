@@ -161,4 +161,8 @@ def update_learning_rate(optimizer, learning_rate):
 
 def linear_schedule(cur_step, tot_step, schedule):
     progress = cur_step / tot_step
-    return progress * (schedule[1] - schedule[0]) + schedule[0]
+    return np.clip(
+        progress * (schedule[1] - schedule[0]) + schedule[0],
+        np.min(np.array(schedule)),
+        np.max(np.array(schedule)),
+    )

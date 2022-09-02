@@ -7,7 +7,6 @@ from rltorch.memory import MultiStepMemory
 from agent.common.replay_buffer import MyMultiStepMemory, MyPrioritizedMemory
 from agent.common.util import (
     to_batch,
-    assert_shape,
     np2ts,
     ts2np,
     check_output_action,
@@ -371,6 +370,9 @@ class MultiTaskAgent(BasicAgent):
             returns[i] = episode_reward
             success += int(self.is_success(info))
 
+        self.log_evaluation(episodes, returns, success)
+
+    def log_evaluation(self, episodes, returns, success):
         mean_return = np.mean(returns)
         self.success_rate = success / episodes
         wandb.log({"evaluate/reward": mean_return})
@@ -437,9 +439,13 @@ class MultiTaskAgent(BasicAgent):
             else:
                 self.task_idx = 0
                 self.prev_ws.append(self.env.w)
+                self.post_all_tasks_process()
                 print(f"current task budget exhaust and switch to task{self.task_idx}!")
 
         self.update_task()
+
+    def post_all_tasks_process(self):
+        pass
 
     def update_task(self):
         if self.task_schedule is not None:
@@ -485,5 +491,6 @@ class MultiTaskAgent(BasicAgent):
     def task_budget_exhaust(self):
         next_task_step = int(self.budget_per_task * (len(self.prev_ws) + 1))
         print("steps", self.steps)
+        print("current task", self.task_idx)
         print("switch next task at", next_task_step)
         return self.steps >= next_task_step
