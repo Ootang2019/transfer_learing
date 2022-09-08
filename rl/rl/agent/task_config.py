@@ -32,19 +32,19 @@ attitude_ctrl_task["constraint"].update(
         "pos_lbnd_cost": np.array([0.5, 0.5, 0.5]),
     }
 )
-attitude_ctrl_task["success"].update({"att": np.array([100.0, 100.0, 100.0])})
+attitude_ctrl_task["success"].update({"att": np.array([10.0, 10.0, 10.0])})
 
 roll_ctrl_task = copy.deepcopy(attitude_ctrl_task)
 roll_ctrl_task["tracking"].update({"ang_diff": np.array([1.0, 0.0, 0.0])})
-roll_ctrl_task["success"].update({"att": np.array([100.0, 0.0, 0.0])})
+roll_ctrl_task["success"].update({"att": np.array([10.0, 0.0, 0.0])})
 
 pitch_ctrl_task = copy.deepcopy(attitude_ctrl_task)
 pitch_ctrl_task["tracking"].update({"ang_diff": np.array([0.0, 1.0, 0.0])})
-pitch_ctrl_task["success"].update({"att": np.array([0.0, 100.0, 0.0])})
+pitch_ctrl_task["success"].update({"att": np.array([0.0, 10.0, 0.0])})
 
 yaw_ctrl_task = copy.deepcopy(attitude_ctrl_task)
 yaw_ctrl_task["tracking"].update({"ang_diff": np.array([0.0, 0.0, 1.0])})
-yaw_ctrl_task["success"].update({"att": np.array([0.0, 0.0, 100.0])})
+yaw_ctrl_task["success"].update({"att": np.array([0.0, 0.0, 10.0])})
 
 xyz_ctrl_task = copy.deepcopy(base_task)
 xyz_ctrl_task["tracking"].update(
@@ -63,7 +63,7 @@ xyz_ctrl_task["constraint"].update(
 )
 xyz_ctrl_task["success"].update(
     {
-        "pos": np.array([100.0, 100.0, 100.0]),
+        "pos": np.array([10.0, 10.0, 10.0]),
         "fail": np.array([-10.0]),
     }
 )
@@ -77,7 +77,7 @@ z_ctrl_task["tracking"].update(
 )
 z_ctrl_task["success"].update(
     {
-        "pos": np.array([0.0, 0.0, 100.0]),
+        "pos": np.array([0.0, 0.0, 10.0]),
     }
 )
 
@@ -90,7 +90,7 @@ xz_ctrl_task["tracking"].update(
 )
 xz_ctrl_task["success"].update(
     {
-        "pos": np.array([100.0, 0.0, 100.0]),
+        "pos": np.array([10.0, 0.0, 10.0]),
     }
 )
 
@@ -103,7 +103,7 @@ yz_ctrl_task["tracking"].update(
 )
 yz_ctrl_task["success"].update(
     {
-        "pos": np.array([0.0, 100.0, 100.0]),
+        "pos": np.array([0.0, 10.0, 10.0]),
     }
 )
 

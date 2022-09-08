@@ -173,13 +173,14 @@ class MultiTaskAgent(BasicAgent):
         mini_batch_size: int = 128,
         min_n_experience: int = 1024,
         updates_per_step: int = 1,
-        train_ntime_per_task: int = 3,
+        train_nround: int = 3,
         render: bool = False,
         log_interval=10,
         eval=True,
         eval_interval=10,
         evaluate_episodes=10,
         task_schedule=None,
+        enable_curriculum_learning=False,
         seed=0,
         **kwargs,
     ):
@@ -219,14 +220,35 @@ class MultiTaskAgent(BasicAgent):
         self.prev_ws = []
         self.learn_all_tasks = False
         self.task_schedule = task_schedule
-        self.train_ntime_per_task = train_ntime_per_task
+        self.train_nround = train_nround
         if task_schedule is not None:
             self.budget_per_task = self.total_timesteps / (
-                len(self.task_schedule) * self.train_ntime_per_task
+                len(self.task_schedule) * self.train_nround
             )
         else:
             self.budget_per_task = self.total_timesteps
         self.update_task()
+
+        self.enable_curriculum_learning = enable_curriculum_learning
+        if self.enable_curriculum_learning:
+            self.goal_range = dict(
+                x_range=(-15, 15),
+                y_range=(-15, 15),
+                z_range=(-5, -35),
+                v_range=(0, 3),
+                phi_range=(-0.25, 0.25),
+                the_range=(-0.25, 0.25),
+                psi_range=(-np.pi, np.pi),
+                phivel_range=(-0.1, 0.1),
+                thevel_range=(-0.1, 0.1),
+                psivel_range=(-0.1, 0.1),
+            )
+            self.goal_range = {
+                k: np.array(v) / self.train_nround for k, v in self.goal_range.items()
+            }
+            self.update_goal_range()
+        else:
+            self.goal_range = {}
 
         self.prioritized_memory = prioritized_memory
         if self.prioritized_memory:
@@ -308,7 +330,9 @@ class MultiTaskAgent(BasicAgent):
         wandb.log({"reward/train_reward": episode_reward})
 
         try:
+            success_rate = int(info["terminal_info"]["success"]) / episode_steps
             crash_rate = int(info["terminal_info"]["fail"]) / episode_steps
+            wandb.log({"reward/train_success_rate": success_rate})
             wandb.log({"reward/train_crash_rate": crash_rate})
         except:
             pass
@@ -445,7 +469,16 @@ class MultiTaskAgent(BasicAgent):
         self.update_task()
 
     def post_all_tasks_process(self):
-        pass
+        if self.enable_curriculum_learning:
+            m = np.power(self.train_nround, 1 / (self.train_nround - 1))
+            self.goal_range = {k: v * m for k, v in self.goal_range.items()}
+            self.update_goal_range()
+
+    def update_goal_range(self):
+        try:
+            self.env.target_type.sample_new_goal(self.goal_range)
+        except:
+            pass
 
     def update_task(self):
         if self.task_schedule is not None:

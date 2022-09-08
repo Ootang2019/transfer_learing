@@ -1,4 +1,4 @@
-program: rl/rl/agent/sfgpi.py
+program: rl/rl/agent/nac.py
 method: bayes
 metric:
   name: evaluate/reward
@@ -8,7 +8,9 @@ parameters:
     values: [True, False]
   normalize_critic:
     values: [True, False]
-  compute_target_by_sfv:
+  calc_pol_loss_by_advantage:
     values: [True, False]
-  policy_class:
-    values: ["Gaussian", "GaussianMixture"]
+  prioritized_memory:
+    values: [True, False]
+  reward_scale:
+    values: [1, 2, 5]

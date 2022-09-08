@@ -37,7 +37,7 @@ class QNetwork(BaseNetwork):
 
 class TwinnedQNetwork(BaseNetwork):
     def __init__(self, observation_dim, action_dim, sizes=[64, 64], activation=nn.ReLU):
-        super(TwinnedQNetwork, self).__init__()
+        super().__init__()
 
         self.Q1 = QNetwork(observation_dim, action_dim, sizes, activation)
         self.Q2 = QNetwork(observation_dim, action_dim, sizes, activation)
@@ -47,6 +47,42 @@ class TwinnedQNetwork(BaseNetwork):
         q1 = self.Q1(x)
         q2 = self.Q2(x)
         return q1, q2
+
+
+class VNetwork(BaseNetwork):
+    def __init__(self, observation_dim, sizes=[64, 64], activation=nn.ReLU) -> None:
+        super().__init__()
+        self.observation_dim = observation_dim
+        self.sizes = sizes
+
+        self.fc1 = nn.Linear(self.observation_dim, self.sizes[0])
+        self.ln1 = nn.LayerNorm(self.sizes[0])
+        self.fc2 = nn.Linear(self.sizes[0], self.sizes[1])
+        self.ln2 = nn.LayerNorm(self.sizes[1])
+        self.fc3 = nn.Linear(self.sizes[1], 1)
+        self.activation = activation()
+
+    def forward(self, x):
+        x = self.activation(self.ln1(self.fc1(x)))
+        x = self.activation(self.ln2(self.fc2(x)))
+        x = self.fc3(x)
+        return x
+
+
+class TwinnedVNetwork(BaseNetwork):
+    def __init__(self, observation_dim, sizes=[64, 64], activation=nn.ReLU):
+        super().__init__()
+
+        self.observation_dim = observation_dim
+
+        self.V1 = VNetwork(observation_dim, sizes, activation)
+        self.V2 = VNetwork(observation_dim, sizes, activation)
+
+    def forward(self, observations):
+        observations = check_dim(observations, self.observation_dim)
+        v1 = self.V1(observations)
+        v2 = self.V2(observations)
+        return v1, v2
 
 
 class SFNetwork(BaseNetwork):

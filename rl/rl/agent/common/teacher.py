@@ -61,14 +61,14 @@ class PIDController:
 
     def mul_sample_act(self, err, err_i_sensor, err_d_sensor, windup):
         if not self.i_from_sensor:
-            # sample uniform random [-0.02, 0.02]
-            err_i = torch.rand(err.shape).to(device) * 0.04 - 0.02
+            # sample uniform random [-0.001, 0.001]
+            err_i = torch.rand(err.shape).to(device) * 0.002 - 0.001
         else:
             err_i = err_i_sensor
 
         if not self.d_from_sensor:
-            # sample gaussian (err, 0.001)
-            prev_err = torch.normal(err, 0.001 * torch.ones_like(err)).to(device)
+            # sample gaussian (err, 0.00001)
+            prev_err = torch.normal(err, 0.00001 * torch.ones_like(err)).to(device)
             err_d = (err - prev_err) / (self.delta_t + EPS)
         else:
             err_d = err_d_sensor

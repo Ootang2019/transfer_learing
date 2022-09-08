@@ -52,7 +52,7 @@ class MultiTaskEnv(BaseEnv):
                 "simulation_frequency": 50,  # [hz]
                 "policy_frequency": 25,  # [hz]
                 "position_success_threshhold": 1,  # [meters]
-                "attitude_success_threshhold": 0.05,  # [rad]
+                "attitude_success_threshhold": 0.02,  # [rad]
                 "tasks": {
                     "tracking": {
                         "ori_diff": np.array([1.0, 1.0, 1.0, 1.0]),
