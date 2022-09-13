@@ -68,6 +68,7 @@ class RandomGoal(TargetType):
             thevel_range=(-10, 10),
             psivel_range=(-10, 10),
         ),
+        max_z: float = -5.0,
         **kwargs,  # pylint: disable=unused-argument
     ) -> None:
         super().__init__(env)

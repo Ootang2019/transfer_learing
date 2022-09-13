@@ -80,6 +80,8 @@ class SFGPIAgent(MultiTaskAgent):
             entropy_tuning=True,
             alpha_bnd=np.array([0.5, 10]),
             net_kwargs={"value_sizes": [64, 64], "policy_sizes": [32, 32]},
+            explore_with_gpe=True,
+            explore_with_gpe_after_n_round=3,
             task_schedule=None,
             train_nround=10,
             enable_curriculum_learning=False,
@@ -97,6 +99,11 @@ class SFGPIAgent(MultiTaskAgent):
     ) -> None:
         self.config = config
         super().__init__(**config)
+
+        self.explore_with_gpe = config.get("explore_with_gpe", True)
+        self.explore_with_gpe_after_n_round = config.get(
+            "explore_with_gpe_after_n_round", 3
+        )
 
         self.lr = config.get("lr", 1e-3)
         self.lr_schedule = np.array(config.get("lr_schedule", None))
@@ -169,10 +176,14 @@ class SFGPIAgent(MultiTaskAgent):
             self.alpha_bnd *= 0.9
 
         if self.lr_schedule is not None:
-            self.lr_schedule *= 0.9
+            self.lr_schedule *= 0.95
 
         if self.pol_lr_schedule is not None:
-            self.pol_lr_schedule *= 0.9
+            self.pol_lr_schedule *= 0.95
+
+        if self.n_round > self.explore_with_gpe_after_n_round:
+            self.explore_with_gpe = True
+
         return super().post_all_tasks_process()
 
     def update_lr(self):
@@ -194,8 +205,11 @@ class SFGPIAgent(MultiTaskAgent):
                 update_learning_rate(optim, self.pol_lr)
 
     def explore(self, obs, w):
-        acts, qs = self.gpe(obs, w, "explore")
-        act = self.gpi(acts, qs)
+        if self.explore_with_gpe:
+            acts, qs = self.gpe(obs, w, "explore")
+            act = self.gpi(acts, qs)
+        else:
+            act, _, _ = self.pols[self.task_idx](obs)
         return act
 
     def exploit(self, obs, w):
@@ -374,7 +388,10 @@ class SFGPIAgent(MultiTaskAgent):
 
     def calc_target_sfv(self, next_obs, features, dones, sf_target):
         with torch.no_grad():
-            next_sf = self.calc_sf_value_by_random_actions(next_obs, sf_target)
+            next_sf0, next_sf1 = self.calc_sf_value_by_random_actions(
+                next_obs, sf_target
+            )
+            next_sf = torch.min(next_sf0, next_sf1)
             next_sf = next_sf.view(-1, self.n_particles, self.feature_dim)
             next_sfv = self.log_mean_exp(next_sf)
             assert_shape(next_sfv, [None, self.feature_dim])
@@ -591,14 +608,17 @@ class TEACHER_SFGPI(SFGPIAgent):
         return super().run()
 
     def explore(self, obs, w):
-        acts, qs = self.gpe(obs, w, "explore")
+        if self.explore_with_gpe:
+            acts, qs = self.gpe(obs, w, "explore")
 
-        if self.enable_tsf:
-            tacts, tqs = self.tgpe(obs, w)
-            acts.extend(tacts)
-            qs.extend(tqs)
+            if self.enable_tsf:
+                tacts, tqs = self.tgpe(obs, w)
+                acts.extend(tacts)
+                qs.extend(tqs)
 
-        act = self.gpi(acts, qs)
+            act = self.gpi(acts, qs)
+        else:
+            act, _, _ = self.pols[self.task_idx](obs)
         return act
 
     def exploit(self, obs, w):
@@ -825,15 +845,16 @@ class TEACHER_SFGPI(SFGPIAgent):
                 pol.reset()
 
     def log_evaluation(self, episodes, returns, success):
-        st_act_ratio = self.stu_act_cnt / (self.stu_act_cnt + self.tea_act_cnt + 1)
-        metrics = {
-            "evaluate/teacher_q0": torch.mean(torch.tensor(self.tq0)),
-            "evaluate/teacher_q1": torch.mean(torch.tensor(self.tq1)),
-            "evaluate/student_q0": torch.mean(torch.tensor(self.sq)),
-            "evaluate/student_teacher_act_ratio": st_act_ratio,
-        }
-        wandb.log(metrics)
-        self.sq, self.tq0, self.tq1 = [], [], []
+        if self.enable_tsf:
+            st_act_ratio = self.stu_act_cnt / (self.stu_act_cnt + self.tea_act_cnt + 1)
+            metrics = {
+                "evaluate/teacher_q0": torch.mean(torch.tensor(self.tq0)),
+                "evaluate/teacher_q1": torch.mean(torch.tensor(self.tq1)),
+                "evaluate/student_q0": torch.mean(torch.tensor(self.sq)),
+                "evaluate/student_teacher_act_ratio": st_act_ratio,
+            }
+            self.sq, self.tq0, self.tq1 = [], [], []
+            wandb.log(metrics)
         return super().log_evaluation(episodes, returns, success)
 
 

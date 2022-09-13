@@ -221,6 +221,7 @@ class MultiTaskAgent(BasicAgent):
         self.learn_all_tasks = False
         self.task_schedule = task_schedule
         self.train_nround = train_nround
+        self.n_round = 0
         if task_schedule is not None:
             self.budget_per_task = self.total_timesteps / (
                 len(self.task_schedule) * self.train_nround
@@ -234,7 +235,7 @@ class MultiTaskAgent(BasicAgent):
             self.goal_range = dict(
                 x_range=(-15, 15),
                 y_range=(-15, 15),
-                z_range=(-5, -35),
+                z_range=(-15, 15),
                 v_range=(0, 3),
                 phi_range=(-0.25, 0.25),
                 the_range=(-0.25, 0.25),
@@ -462,6 +463,7 @@ class MultiTaskAgent(BasicAgent):
                 print(f"current task budget exhaust and switch to task{self.task_idx}")
             else:
                 self.task_idx = 0
+                self.n_round += 1
                 self.prev_ws.append(self.env.w)
                 self.post_all_tasks_process()
                 print(f"current task budget exhaust and switch to task{self.task_idx}!")
@@ -476,9 +478,17 @@ class MultiTaskAgent(BasicAgent):
 
     def update_goal_range(self):
         try:
+            self.modify_goal_range()
             self.env.target_type.sample_new_goal(self.goal_range)
         except:
             pass
+
+    def modify_goal_range(self, max_z=-5):
+        z_range = self.goal_range["z_range"]
+        z_range -= 25
+        if z_range[1] > max_z:
+            z_range[1] = max_z
+            self.goal_range["z_range"] = z_range
 
     def update_task(self):
         if self.task_schedule is not None:
