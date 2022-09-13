@@ -52,7 +52,7 @@ class NACAgent(MultiTaskAgent):
             render=False,
             log_interval=10,
             entropy_tuning=True,
-            normalize_critic=True,
+            alpha_bnd=[0.1, 10],
             calc_pol_loss_by_advantage=True,
             eval=True,
             eval_interval=100,
@@ -78,7 +78,6 @@ class NACAgent(MultiTaskAgent):
             config.get("min_n_experience", int(1e4))
         )
         self.n_particles = config.get("n_particles", 64)
-        self.normalize_critic = config.get("normalize_critic", True)
         self.calc_pol_loss_by_advantage = config.get("calc_pol_loss_by_advantage", True)
         self.entropy_tuning = config.get("entropy_tuning", True)
         self.eval_interval = config.get("eval_interval", 1000)
@@ -118,10 +117,14 @@ class NACAgent(MultiTaskAgent):
             ).item()
             # optimize log(alpha), instead of alpha
             self.log_alpha = torch.zeros(1, requires_grad=True, device=device)
+            self.alpha_bnd = config.get("alpha_bnd", [1e-1, 10])
             self.alpha = self.log_alpha.exp()
+            self.alpha = torch.clip(self.alpha, *self.alpha_bnd)
             self.alpha_optimizer = Adam([self.log_alpha], lr=self.alpha_lr)
         else:
             self.alpha = torch.tensor(config.get("alpha", 0.2)).to(device)
+
+        self.beta = 1 / self.mini_batch_size
 
         wandb.watch(self.critic)
         wandb.watch(self.policy)
@@ -159,7 +162,6 @@ class NACAgent(MultiTaskAgent):
             weights = 1
 
         policy_loss, entropies = self.calc_policy_loss(batch, weights)
-        update_params(self.policy_optimizer, self.policy, policy_loss, self.grad_clip)
 
         (
             q1_loss,
@@ -167,17 +169,20 @@ class NACAgent(MultiTaskAgent):
             errors,
             mean_q1,
             mean_q2,
+            mean_v,
             loss_q,
             loss_pg,
         ) = self.calc_critic_loss(batch, weights)
 
         update_params(self.q1_optimizer, self.critic.Q1, q1_loss, self.grad_clip)
         update_params(self.q2_optimizer, self.critic.Q2, q2_loss, self.grad_clip)
+        update_params(self.policy_optimizer, self.policy, policy_loss, self.grad_clip)
 
         if self.entropy_tuning:
             entropy_loss = self.calc_entropy_loss(entropies, weights)
             update_params(self.alpha_optimizer, None, entropy_loss)
             self.alpha = self.log_alpha.exp()
+            self.alpha = torch.clip(self.log_alpha.exp(), *self.alpha_bnd)
 
         if self.prioritized_memory:
             self.replay_buffer.update_priority(indices, errors.cpu().numpy())
@@ -189,8 +194,9 @@ class NACAgent(MultiTaskAgent):
                 "loss/policy": policy_loss.detach().item(),
                 "loss/Q": loss_q,
                 "loss/PG": loss_pg,
-                "state/mean_V1": mean_q1,
-                "state/mean_V2": mean_q2,
+                "state/mean_Q1": mean_q1,
+                "state/mean_Q2": mean_q2,
+                "state/mean_V": mean_v,
                 "state/entropy": entropies.detach().mean().item(),
             }
             wandb.log(metrics)
@@ -207,40 +213,39 @@ class NACAgent(MultiTaskAgent):
         (observations, features, actions, rewards, next_observations, dones) = batch
         rewards *= self.reward_scale
 
+        # critic loss is mean squared TD errors.
         curr_q1, curr_q2 = self.calc_current_q(observations, actions)
         target_q = self.calc_target_q(rewards, next_observations, dones)
+
+        q1_loss = torch.mean((curr_q1 - target_q).pow(2) * weights)
+        q2_loss = torch.mean((curr_q2 - target_q).pow(2) * weights)
+
+        # critic normalization loss
+        curr_q1, curr_q2 = self.calc_current_q(observations, actions)
+        curr_v = self.calc_v(observations)
+
+        pg_loss1 = self.calc_critic_normalize_loss(
+            self.critic.Q1, curr_q1, target_q, curr_v, weights
+        )
+        pg_loss2 = self.calc_critic_normalize_loss(
+            self.critic.Q2, curr_q2, target_q, curr_v, weights
+        )
+
+        # sum all loss
+        loss1 = q1_loss + pg_loss1
+        loss2 = q2_loss + pg_loss2
 
         # TD errors for updating priority weights
         errors = torch.abs(curr_q1.detach() - target_q)
 
-        # We log means of v to monitor training.
+        # log to monitor training.
         mean_q1 = curr_q1.detach().mean().item()
         mean_q2 = curr_q2.detach().mean().item()
-
-        # Critic loss is mean squared TD errors.
-        q1_loss = torch.mean((curr_q1 - target_q).pow(2) * weights)
-        q2_loss = torch.mean((curr_q2 - target_q).pow(2) * weights)
-
+        mean_v = curr_v.detach().mean().item()
         loss_q1 = q1_loss.detach()
-        loss_pg1 = 0
+        loss_pg1 = pg_loss1.detach()
 
-        if self.normalize_critic:
-            curr_q1, curr_q2 = self.calc_current_q(observations, actions)
-            curr_v1, curr_v2 = self.calc_v(self.critic, observations)
-            next_v1, next_v2 = self.calc_v(self.critic_target, next_observations)
-
-            pg_loss1 = self.calc_critic_normalize_loss(
-                self.critic.Q1, rewards, curr_q1, curr_v1, next_v1, weights
-            )
-            pg_loss2 = self.calc_critic_normalize_loss(
-                self.critic.Q2, rewards, curr_q2, curr_v2, next_v2, weights
-            )
-            q1_loss = q1_loss + pg_loss1
-            q2_loss = q2_loss + pg_loss2
-
-            loss_pg1 = pg_loss1.detach()
-
-        return q1_loss, q2_loss, errors, mean_q1, mean_q2, loss_q1, loss_pg1
+        return loss1, loss2, errors, mean_q1, mean_q2, mean_v, loss_q1, loss_pg1
 
     def calc_policy_loss(self, batch, weights):
         (observations, features, actions, rewards, next_observations, dones) = batch
@@ -253,8 +258,7 @@ class NACAgent(MultiTaskAgent):
         q = torch.min(q1, q2)
 
         if self.calc_pol_loss_by_advantage:
-            v1, v2 = self.calc_v(self.critic_target, observations)
-            v = torch.min(v1, v2)
+            v = self.calc_v(observations)
             q = q - v
 
         # Policy objective is maximization of (Q + alpha * entropy).
@@ -275,50 +279,38 @@ class NACAgent(MultiTaskAgent):
 
     def calc_target_q(self, rewards, next_states, dones):
         with torch.no_grad():
-            next_actions, next_entropies, _ = self.policy.sample(next_states)
-            next_q1, next_q2 = self.critic_target(next_states, next_actions)
-            next_q = torch.min(next_q1, next_q2) + self.alpha * next_entropies
-
-            target_q = rewards + (1.0 - dones) * self.gamma * next_q
+            next_v = self.calc_v(next_states)
+        target_q = rewards + (1.0 - dones) * self.gamma * next_v
         return target_q
 
-    def calc_critic_normalize_loss(self, net, rewards, curr_q, v, next_v, weights):
-        target_q = rewards + self.gamma * next_v
-        gradient = self.calc_normalized_grad(net, curr_q, target_q, v, weights)
+    def calc_critic_normalize_loss(self, net, curr_q, target_q, curr_v, weights):
+        gradient = self.calc_normalized_grad(net, curr_q, target_q, curr_v, weights)
         pg_loss = self.calc_surrogate_loss(net, gradient)
+        pg_loss = self.beta * pg_loss
         return pg_loss
 
-    def calc_v(self, critic, obs):
-        sample_act = (
-            torch.distributions.uniform.Uniform(-1, 1)
-            .sample((self.n_particles, self.action_dim))
-            .to(device)
-        )
-        sample_obs, sample_act = get_sa_pairs(obs, sample_act)
-        q0, q1 = critic(sample_obs, sample_act)
-
-        q0 = q0.view(-1, self.n_particles)
-        q1 = q1.view(-1, self.n_particles)
-
-        v0 = self.log_sum_exp_q(q0)
-        v1 = self.log_sum_exp_q(q1)
-        return v0, v1
+    def calc_v(self, obs):
+        with torch.no_grad():
+            sample_act = (
+                torch.distributions.uniform.Uniform(-1, 1)
+                .sample((self.n_particles, self.action_dim))
+                .to(device)
+            )
+            sample_obs, sample_act = get_sa_pairs(obs, sample_act)
+            q0, q1 = self.critic_target(sample_obs, sample_act)
+            q = torch.min(q0, q1)
+            q = q.view(-1, self.n_particles)
+            v = self.log_sum_exp_q(q)
+        return v
 
     def log_sum_exp_q(self, qs):
-        v = torch.logsumexp(qs, 1)
+        v = torch.logsumexp(qs / self.alpha, 1)
         v = v - np.log(self.n_particles)
         v = v + self.action_dim * np.log(2)
+        v = self.alpha * v
         v = v.unsqueeze(1)
         assert_shape(v, [None, 1])
         return v
-
-    def calc_target_v(self, rewards, next_states, dones):
-        with torch.no_grad():
-            _, next_entropies, _ = self.policy.sample(next_states)
-            next_v0, next_v1 = self.calc_v(self.critic_target, next_states)
-            next_v = torch.min(next_v0, next_v1) + self.alpha * next_entropies
-            target_v = rewards + (1.0 - dones) * self.gamma * next_v
-        return target_v, (next_v0, next_v1)
 
     def calc_normalized_grad(self, net, q, target_q, v, weights):
         gradient = torch.autograd.grad(
@@ -365,7 +357,6 @@ if __name__ == "__main__":
     from drone_env.envs.script import close_simulation
 
     env = "myInvertedDoublePendulum-v4"  # myInvertedDoublePendulum-v4, multitask-v0
-    render = False
     auto_start_simulation = False
     if auto_start_simulation:
         close_simulation()
@@ -376,7 +367,7 @@ if __name__ == "__main__":
 
         env_config = {
             "simulation": {
-                "gui": render,
+                "gui": True,
                 "enable_meshes": True,
                 "auto_start_simulation": auto_start_simulation,
                 "position": (0, 0, 25),  # initial spawned position
@@ -400,13 +391,16 @@ if __name__ == "__main__":
         dict(
             env=env,
             env_kwargs=env_kwargs,
-            render=render,
+            render=False,
             entropy_tuning=True,
-            normalize_critic=True,
             calc_pol_loss_by_advantage=True,
             prioritized_memory=True,
             reward_scale=1,
+            lr=5e-4,
+            policy_lr=5e-3,
+            total_timesteps=5e4,
             eval=True,
+            evaluate_episodes=3,
         )
     )
 

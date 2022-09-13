@@ -4,13 +4,5 @@ metric:
   name: evaluate/reward
   goal: maximize
 parameters:
-  entropy_tuning:
-    values: [True, False]
   normalize_critic:
     values: [True, False]
-  calc_pol_loss_by_advantage:
-    values: [True, False]
-  prioritized_memory:
-    values: [True, False]
-  reward_scale:
-    values: [1, 2, 5]

@@ -115,9 +115,12 @@ class MyInvertedDoublePendulumEnv(MujocoEnv, utils.EzPickle):
         self.feature_space = Box(
             low=-np.inf, high=np.inf, shape=(len(self.w),), dtype=np.float32
         )
-        self.max_episode_steps = 1000
+        self.max_episode_steps = int(1e3)
+        self.episode_steps = 0
 
     def step(self, action):
+        self.episode_steps += 1
+
         self.do_simulation(action, self.frame_skip)
         ob = self._get_obs()
         x, _, y = self.data.site_xpos[0]
@@ -127,6 +130,10 @@ class MyInvertedDoublePendulumEnv(MujocoEnv, utils.EzPickle):
         r = np.dot(self.w, features)
 
         terminated = bool(y <= 1)
+        if self.episode_steps >= self.max_episode_steps:
+            terminated = True
+            self.episode_steps = 0
+
         self.renderer.render_step()
         return ob, r, terminated, False, {"features": features}
 
