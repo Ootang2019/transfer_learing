@@ -52,23 +52,24 @@ class TargetType:
 class RandomGoal(TargetType):
     """a random generated goal during training"""
 
+    Default_Range_Dict = dict(
+        x_range=(-50, 50),
+        y_range=(-50, 50),
+        z_range=(-5, -50),
+        v_range=(-50, 50),
+        phi_range=(-np.pi, np.pi),
+        the_range=(-np.pi, np.pi),
+        psi_range=(-np.pi, np.pi),
+        phivel_range=(-10, 10),
+        thevel_range=(-10, 10),
+        psivel_range=(-10, 10),
+    )
+
     def __init__(
         self,
         env: "AbstractEnv",
         target_name_space="goal_0",
-        range_dict: dict = dict(
-            x_range=(-50, 50),
-            y_range=(-50, 50),
-            z_range=(-5, -50),
-            v_range=(-50, 50),
-            phi_range=(-np.pi, np.pi),
-            the_range=(-np.pi, np.pi),
-            psi_range=(-np.pi, np.pi),
-            phivel_range=(-10, 10),
-            thevel_range=(-10, 10),
-            psivel_range=(-10, 10),
-        ),
-        max_z: float = -5.0,
+        range_dict: dict = None,
         **kwargs,  # pylint: disable=unused-argument
     ) -> None:
         super().__init__(env)
@@ -82,6 +83,8 @@ class RandomGoal(TargetType):
         self.ang_cmd_data = np.zeros(3)
         self.angvel_cmd_data = np.zeros(3)
 
+        if range_dict is None:
+            range_dict = self.Default_Range_Dict
         self.range_dict = range_dict
 
         self._pub_and_sub = False
@@ -196,26 +199,34 @@ class RandomGoal(TargetType):
             "velocity": self.vel_cmd_data,
         }
 
+    def get_range_dict(self):
+        return self.range_dict
+
 
 class FixedGoal(RandomGoal):
+    Default_Range_Dict = dict(
+        x_range=(-15, 15),
+        y_range=(-15, 15),
+        z_range=(-15, 15),
+        v_range=(0, 3),
+        phi_range=(-0.25, 0.25),
+        the_range=(-0.25, 0.25),
+        psi_range=(-np.pi, np.pi),
+        phivel_range=(-0.1, 0.1),
+        thevel_range=(-0.1, 0.1),
+        psivel_range=(-0.1, 0.1),
+    )
+
     def __init__(
         self,
         env: "AbstractEnv",
         target_name_space="goal_0",
-        range_dict: dict = dict(
-            x_range=(-0, 0),
-            y_range=(-0, 0),
-            z_range=(-15, -35),
-            v_range=(-0, 0),
-            phi_range=(-0.0, 0.0),
-            the_range=(-0.0, 0.0),
-            psi_range=(-0, 0),
-            phivel_range=(-0, 0),
-            thevel_range=(-0, 0),
-            psivel_range=(-0, 0),
-        ),
+        range_dict: dict = None,
         **kwargs,
     ) -> None:
+        if range_dict is None:
+            range_dict = self.Default_Range_Dict
+
         super().__init__(env, target_name_space, range_dict, **kwargs)
 
     def sample_new_goal(

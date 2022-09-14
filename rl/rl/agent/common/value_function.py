@@ -14,7 +14,7 @@ class BaseNetwork(nn.Module):
 
 class QNetwork(BaseNetwork):
     def __init__(
-        self, observation_dim, action_dim, sizes=[64, 64], activation=nn.ReLU
+        self, observation_dim, action_dim, sizes=[64, 64], activation=nn.SiLU
     ) -> None:
         super().__init__()
         self.observation_dim = observation_dim
@@ -28,6 +28,19 @@ class QNetwork(BaseNetwork):
         self.fc3 = nn.Linear(self.sizes[1], 1)
         self.activation = activation()
 
+        self.apply(self._init_weights)
+        nn.init.xavier_uniform_(self.fc3.weight, 0.01)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight, 1)
+            if module.bias is not None:
+                module.bias.data.zero_()
+
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
     def forward(self, x):
         x = self.activation(self.ln1(self.fc1(x)))
         x = self.activation(self.ln2(self.fc2(x)))
@@ -36,7 +49,7 @@ class QNetwork(BaseNetwork):
 
 
 class TwinnedQNetwork(BaseNetwork):
-    def __init__(self, observation_dim, action_dim, sizes=[64, 64], activation=nn.ReLU):
+    def __init__(self, observation_dim, action_dim, sizes=[64, 64], activation=nn.SiLU):
         super().__init__()
 
         self.Q1 = QNetwork(observation_dim, action_dim, sizes, activation)
@@ -50,7 +63,7 @@ class TwinnedQNetwork(BaseNetwork):
 
 
 class VNetwork(BaseNetwork):
-    def __init__(self, observation_dim, sizes=[64, 64], activation=nn.ReLU) -> None:
+    def __init__(self, observation_dim, sizes=[64, 64], activation=nn.SiLU) -> None:
         super().__init__()
         self.observation_dim = observation_dim
         self.sizes = sizes
@@ -62,6 +75,19 @@ class VNetwork(BaseNetwork):
         self.fc3 = nn.Linear(self.sizes[1], 1)
         self.activation = activation()
 
+        self.apply(self._init_weights)
+        nn.init.xavier_uniform_(self.fc3.weight, 0.01)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight, 1)
+            if module.bias is not None:
+                module.bias.data.zero_()
+
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
     def forward(self, x):
         x = self.activation(self.ln1(self.fc1(x)))
         x = self.activation(self.ln2(self.fc2(x)))
@@ -70,7 +96,7 @@ class VNetwork(BaseNetwork):
 
 
 class TwinnedVNetwork(BaseNetwork):
-    def __init__(self, observation_dim, sizes=[64, 64], activation=nn.ReLU):
+    def __init__(self, observation_dim, sizes=[64, 64], activation=nn.SiLU):
         super().__init__()
 
         self.observation_dim = observation_dim
@@ -92,7 +118,7 @@ class SFNetwork(BaseNetwork):
         feature_dim,
         action_dim,
         sizes=[64, 64],
-        activation=nn.ReLU,
+        activation=nn.SiLU,
     ) -> None:
         super().__init__()
         self.observation_dim = observation_dim
@@ -106,6 +132,19 @@ class SFNetwork(BaseNetwork):
         self.ln2 = nn.LayerNorm(self.sizes[1])
         self.fc3 = nn.Linear(self.sizes[1], self.feature_dim)
         self.activation = activation()
+
+        self.apply(self._init_weights)
+        nn.init.xavier_uniform_(self.fc3.weight, 0.01)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight, 1)
+            if module.bias is not None:
+                module.bias.data.zero_()
+
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
 
     def forward(self, observations, actions):
         observations = check_dim(observations, self.observation_dim)
@@ -136,7 +175,7 @@ class TwinnedSFNetwork(BaseNetwork):
         feature_dim,
         action_dim,
         sizes=[64, 64],
-        activation=nn.ReLU,
+        activation=nn.SiLU,
     ):
         super().__init__()
 

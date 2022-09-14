@@ -55,7 +55,7 @@ class SFGPIAgent(MultiTaskAgent):
             alpha_lr=3e-4,
             gamma=0.99,
             n_particles=128,
-            multi_step=5,  # note: multi-step can reduce training stability
+            multi_step=5,
             updates_per_step=2,
             replay_buffer_size=1e6,
             prioritized_memory=True,
@@ -74,8 +74,8 @@ class SFGPIAgent(MultiTaskAgent):
             n_gauss=4,
             policy_regularization=1e-3,
             policy_lr=5e-4,
-            delayed_policy_update=1,
             policy_lr_schedule=np.array([5e-3, 5e-4]),
+            delayed_policy_update=1,
             calc_pol_loss_by_advantage=True,
             entropy_tuning=True,
             alpha_bnd=np.array([0.5, 10]),
@@ -100,10 +100,13 @@ class SFGPIAgent(MultiTaskAgent):
         self.config = config
         super().__init__(**config)
 
-        self.explore_with_gpe = config.get("explore_with_gpe", True)
         self.explore_with_gpe_after_n_round = config.get(
             "explore_with_gpe_after_n_round", 3
         )
+        if self.explore_with_gpe_after_n_round > self.n_round:
+            self.explore_with_gpe = False
+        else:
+            self.explore_with_gpe = config.get("explore_with_gpe", True)
 
         self.lr = config.get("lr", 1e-3)
         self.lr_schedule = np.array(config.get("lr_schedule", None))
@@ -153,9 +156,6 @@ class SFGPIAgent(MultiTaskAgent):
         self.beta = 1 / self.mini_batch_size
 
         wandb.watch(self.sfs[0])
-        wandb.watch(self.pols[0])
-        if len(self.pols) > 1:
-            wandb.watch(self.pols[1])
 
     def run(self):
         while True:
@@ -256,7 +256,6 @@ class SFGPIAgent(MultiTaskAgent):
         sf_loss, errors, mean_sf, target_sf, mean_sfv = self.calc_sf_loss(
             batch, sf, sf_tar, pol, weights
         )
-
         update_params(sf_optim[0], sf.SF0, sf_loss[0], self.grad_clip)
         update_params(sf_optim[1], sf.SF1, sf_loss[1], self.grad_clip)
 
@@ -338,17 +337,19 @@ class SFGPIAgent(MultiTaskAgent):
         pg_loss = self.beta * pg_loss
         return pg_loss
 
-    def calc_pol_loss(self, batch, sf_tar, pol, weights):
+    def calc_pol_loss(self, batch, sf_tar_net, pol_net, weights):
         (obs, _, _, _, _, _) = batch
 
-        act, entropy, _ = pol(obs)
-        q = self.calc_q_from_sf(obs, act, sf_tar, self.w)
+        act, entropy, _ = pol_net(obs)
+        q = self.calc_q_from_sf(obs, act, sf_tar_net, self.w)
 
         if self.calc_pol_loss_by_advantage:
-            v = self.calc_v_from_sf(obs, sf_tar, self.w)
+            v = self.calc_v_from_sf(obs, sf_tar_net, self.w)
             q = q - v
 
-        loss = torch.mean((-q - self.alpha * entropy) * weights) + self.reg_loss(pol)
+        loss = torch.mean((-q - self.alpha * entropy) * weights) + self.reg_loss(
+            pol_net
+        )
         return loss, entropy
 
     def calc_entropy_loss(self, entropy, weights):
@@ -617,6 +618,7 @@ class TEACHER_SFGPI(SFGPIAgent):
                 qs.extend(tqs)
 
             act = self.gpi(acts, qs)
+
         else:
             act, _, _ = self.pols[self.task_idx](obs)
         return act
@@ -871,10 +873,10 @@ if __name__ == "__main__":
     import gym
     from drone_env.envs.script import close_simulation
 
-    Agent = TEACHER_SFGPI  # SFGPIAgent, TEACHER_SFGPI
+    Agent = SFGPIAgent  # SFGPIAgent, TEACHER_SFGPI
 
-    env = "multitask-v0"  # "multitask-v0", "myInvertedDoublePendulum-v4"
-    render = True
+    env = "myInvertedDoublePendulum-v4"  # "multitask-v0", "myInvertedDoublePendulum-v4"
+    render = False
     auto_start_simulation = False
     if auto_start_simulation:
         close_simulation()
@@ -927,6 +929,7 @@ if __name__ == "__main__":
             policy_class="Gaussian",
             net_kwargs={"value_sizes": [256, 256], "policy_sizes": [32, 32]},
             task_schedule=task_schedule,
+            evaluate_episodes=3,
         )
     )
 

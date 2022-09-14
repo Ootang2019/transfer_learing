@@ -19,6 +19,7 @@ class GaussianMixture(torch.nn.Module):
         hidden_layers_sizes=[64, 64],
         reg=0.001,
         reparameterize=True,
+        activation=nn.SiLU,
     ):
         super().__init__()
         self._K = K
@@ -32,7 +33,7 @@ class GaussianMixture(torch.nn.Module):
         self.fc1 = nn.Linear(self._input_dim, self._layer_sizes[0])
         self.fc2 = nn.Linear(self._layer_sizes[0], self._layer_sizes[1])
         self.fc3 = nn.Linear(self._layer_sizes[1], self._layer_sizes[2])
-        self.relu = nn.ReLU()
+        self.activ = activation()
         self.tanh = nn.Tanh()
 
         self._log_p_x_t = 0
@@ -44,9 +45,22 @@ class GaussianMixture(torch.nn.Module):
         self._log_ws_t = 0
         self._N_pl = 0
 
+        self.apply(self._init_weights)
+        nn.init.xavier_uniform_(self.fc3.weight, 0.01)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight, 1)
+            if module.bias is not None:
+                module.bias.data.zero_()
+
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
     def get_distribution(self, x):
-        x = self.tanh(self.fc1(x))
-        x = self.tanh(self.fc2(x))
+        x = self.activ(self.fc1(x))
+        x = self.activ(self.fc2(x))
         x = self.fc3(x)
 
         x = x.view(-1, self._K, 2 * self._Dx + 1)

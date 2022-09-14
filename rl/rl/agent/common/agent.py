@@ -1,18 +1,15 @@
+import copy
+import warnings
 from multiprocessing.sharedctypes import Value
+
 import gym
-import torch
 import numpy as np
+import torch
 import wandb
 from rltorch.memory import MultiStepMemory
+
 from agent.common.replay_buffer import MyMultiStepMemory, MyPrioritizedMemory
-from agent.common.util import (
-    to_batch,
-    np2ts,
-    ts2np,
-    check_output_action,
-    check_dim,
-)
-import warnings
+from agent.common.util import check_dim, check_output_action, np2ts, to_batch, ts2np
 
 warnings.simplefilter("once", UserWarning)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -232,22 +229,12 @@ class MultiTaskAgent(BasicAgent):
 
         self.enable_curriculum_learning = enable_curriculum_learning
         if self.enable_curriculum_learning:
-            self.goal_range = dict(
-                x_range=(-15, 15),
-                y_range=(-15, 15),
-                z_range=(-15, 15),
-                v_range=(0, 3),
-                phi_range=(-0.25, 0.25),
-                the_range=(-0.25, 0.25),
-                psi_range=(-np.pi, np.pi),
-                phivel_range=(-0.1, 0.1),
-                thevel_range=(-0.1, 0.1),
-                psivel_range=(-0.1, 0.1),
-            )
-            self.goal_range = {
-                k: np.array(v) / self.train_nround for k, v in self.goal_range.items()
-            }
-            self.update_goal_range()
+            try:
+                self.goal_range = self.env.target_type.get_range_dict()
+                self.update_goal_range(scale=1 / self.train_nround)
+            except:
+                print("env target type has no range_dict attribute")
+                self.goal_range = {}
         else:
             self.goal_range = {}
 
@@ -473,22 +460,28 @@ class MultiTaskAgent(BasicAgent):
     def post_all_tasks_process(self):
         if self.enable_curriculum_learning:
             m = np.power(self.train_nround, 1 / (self.train_nround - 1))
-            self.goal_range = {k: v * m for k, v in self.goal_range.items()}
-            self.update_goal_range()
+            self.update_goal_range(m)
 
-    def update_goal_range(self):
+    def update_goal_range(self, scale=1):
+        self.goal_range = {k: np.array(v) * scale for k, v in self.goal_range.items()}
         try:
-            self.modify_goal_range()
-            self.env.target_type.sample_new_goal(self.goal_range)
+            goal_range = self.modify_goal_range(self.goal_range)
+            self.env.target_type.sample_new_goal(goal_range)
         except:
+            print("env target_type has no method: sample_new_goal()")
             pass
 
-    def modify_goal_range(self, max_z=-5):
-        z_range = self.goal_range["z_range"]
-        z_range -= 25
+    def modify_goal_range(self, original_goal_range, max_z=-5, initial_z=-25):
+        goal_range = copy.deepcopy(original_goal_range)
+        z_range = goal_range["z_range"]
+
+        z_range += initial_z
+
         if z_range[1] > max_z:
             z_range[1] = max_z
-            self.goal_range["z_range"] = z_range
+
+        goal_range["z_range"] = z_range
+        return goal_range
 
     def update_task(self):
         if self.task_schedule is not None:

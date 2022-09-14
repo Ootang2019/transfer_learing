@@ -28,6 +28,7 @@ class StochasticPolicy(BaseNetwork):
         action_dim,
         sizes=[64, 64],
         squash=True,
+        activation=nn.SiLU,
     ):
         super().__init__()
         self.observation_dim = observation_dim
@@ -38,12 +39,25 @@ class StochasticPolicy(BaseNetwork):
         self.fc1 = nn.Linear(self.observation_dim + self.action_dim, sizes[0])
         self.fc2 = nn.Linear(sizes[0], sizes[1])
         self.fc3 = nn.Linear(sizes[1], self.action_dim)
-        self.relu = nn.ReLU()
+        self.activ = activation()
         self.tanh = nn.Tanh()
 
+        self.apply(self._init_weights)
+        nn.init.xavier_uniform_(self.fc3.weight, 0.01)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight, 1)
+            if module.bias is not None:
+                module.bias.data.zero_()
+
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
     def forward(self, x):
-        x = self.relu(self.fc1(x))
-        x = self.relu(self.fc2(x))
+        x = self.activ(self.fc1(x))
+        x = self.activ(self.fc2(x))
         x = self.fc3(x)
         x = self.tanh(x) if self.squash else x
         return x
@@ -79,7 +93,14 @@ class GaussianPolicy(BaseNetwork):
     LOG_STD_MIN = -20
     eps = 1e-6
 
-    def __init__(self, observation_dim, action_dim, sizes=[256, 256], squash=True):
+    def __init__(
+        self,
+        observation_dim,
+        action_dim,
+        sizes=[256, 256],
+        squash=True,
+        activation=nn.SiLU,
+    ):
         super(GaussianPolicy, self).__init__()
 
         self.observation_dim = observation_dim
@@ -90,12 +111,25 @@ class GaussianPolicy(BaseNetwork):
         self.fc1 = nn.Linear(self.observation_dim, sizes[0])
         self.fc2 = nn.Linear(sizes[0], sizes[1])
         self.fc3 = nn.Linear(sizes[1], self.action_dim)
-        self.relu = nn.ReLU()
+        self.activ = activation()
         self.tanh = nn.Tanh()
 
+        self.apply(self._init_weights)
+        nn.init.xavier_uniform_(self.fc3.weight, 0.01)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight, 1)
+            if module.bias is not None:
+                module.bias.data.zero_()
+
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
     def forward(self, obs):
-        x = self.relu(self.fc1(obs))
-        x = self.relu(self.fc2(x))
+        x = self.activ(self.fc1(obs))
+        x = self.activ(self.fc2(x))
         x = self.fc3(x)
         x = self.tanh(x) if self.squash else x
 

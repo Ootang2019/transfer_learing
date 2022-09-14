@@ -219,14 +219,16 @@ class MultiTaskEnv(BaseEnv):
         pos_bnd = self.calc_dist_to_pos_bnd(pos, constr_dict)
         return np.concatenate([survive, act, pos_bnd])
 
-    def calc_dist_to_pos_bnd(self, pos: np.array, constr_dict: dict) -> np.array:
+    def calc_dist_to_pos_bnd(
+        self, pos: np.array, constr_dict: dict, range=(-10, 1)
+    ) -> np.array:
         """closer to the bnd the higher the cost"""
         ubnd_pos = constr_dict["upper_boundary_position"]
         lbnd_pos = constr_dict["lower_boundary_position"]
 
         ubnd_cost = -np.exp(pos - ubnd_pos)
         lbnd_cost = -np.exp(-(pos - lbnd_pos))
-        return np.clip(np.concatenate([ubnd_cost, lbnd_cost]), -10, 1)
+        return np.clip(np.concatenate([ubnd_cost, lbnd_cost]), *range)
 
     def calc_success_features(self, obs_info: dict) -> np.array:
         pos, goal_pos = (

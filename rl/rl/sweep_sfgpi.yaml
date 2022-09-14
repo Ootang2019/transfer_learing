@@ -4,8 +4,6 @@ metric:
   name: evaluate/reward
   goal: maximize
 parameters:
-  entropy_tuning:
-    values: [True, False]
   normalize_critic:
     values: [True, False]
   compute_target_by_sfv:

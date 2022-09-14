@@ -53,6 +53,7 @@ class NACAgent(MultiTaskAgent):
             log_interval=10,
             entropy_tuning=True,
             alpha_bnd=[0.1, 10],
+            normalize_critic=True,
             calc_pol_loss_by_advantage=True,
             eval=True,
             eval_interval=100,
@@ -78,6 +79,7 @@ class NACAgent(MultiTaskAgent):
             config.get("min_n_experience", int(1e4))
         )
         self.n_particles = config.get("n_particles", 64)
+        self.normalize_critic = config.get("normalize_critic", True)
         self.calc_pol_loss_by_advantage = config.get("calc_pol_loss_by_advantage", True)
         self.entropy_tuning = config.get("entropy_tuning", True)
         self.eval_interval = config.get("eval_interval", 1000)
@@ -224,12 +226,16 @@ class NACAgent(MultiTaskAgent):
         curr_q1, curr_q2 = self.calc_current_q(observations, actions)
         curr_v = self.calc_v(observations)
 
-        pg_loss1 = self.calc_critic_normalize_loss(
-            self.critic.Q1, curr_q1, target_q, curr_v, weights
-        )
-        pg_loss2 = self.calc_critic_normalize_loss(
-            self.critic.Q2, curr_q2, target_q, curr_v, weights
-        )
+        if self.normalize_critic:
+            pg_loss1 = self.calc_critic_normalize_loss(
+                self.critic.Q1, curr_q1, target_q, curr_v, weights
+            )
+            pg_loss2 = self.calc_critic_normalize_loss(
+                self.critic.Q2, curr_q2, target_q, curr_v, weights
+            )
+        else:
+            pg_loss1 = 0
+            pg_loss2 = 0
 
         # sum all loss
         loss1 = q1_loss + pg_loss1
@@ -242,8 +248,12 @@ class NACAgent(MultiTaskAgent):
         mean_q1 = curr_q1.detach().mean().item()
         mean_q2 = curr_q2.detach().mean().item()
         mean_v = curr_v.detach().mean().item()
+
         loss_q1 = q1_loss.detach()
-        loss_pg1 = pg_loss1.detach()
+        if self.normalize_critic:
+            loss_pg1 = pg_loss1.detach()
+        else:
+            loss_pg1 = pg_loss1
 
         return loss1, loss2, errors, mean_q1, mean_q2, mean_v, loss_q1, loss_pg1
 
@@ -395,6 +405,7 @@ if __name__ == "__main__":
             entropy_tuning=True,
             calc_pol_loss_by_advantage=True,
             prioritized_memory=True,
+            normalize_critic=True,
             reward_scale=1,
             lr=5e-4,
             policy_lr=5e-3,
