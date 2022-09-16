@@ -115,7 +115,7 @@ class GaussianPolicy(BaseNetwork):
         self.tanh = nn.Tanh()
 
         self.apply(self._init_weights)
-        nn.init.xavier_uniform_(self.fc3.weight, 0.01)
+        nn.init.xavier_uniform_(self.fc3.weight, 0.0001)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):

@@ -55,8 +55,8 @@ class SFGPIAgent(MultiTaskAgent):
             alpha_lr=3e-4,
             gamma=0.99,
             n_particles=128,
-            multi_step=5,
-            updates_per_step=2,
+            multi_step=1,
+            updates_per_step=1,
             replay_buffer_size=1e6,
             prioritized_memory=True,
             mini_batch_size=256,
@@ -65,7 +65,7 @@ class SFGPIAgent(MultiTaskAgent):
             tau=5e-3,
             alpha=0.2,
             lr=1e-4,
-            lr_schedule=np.array([1e-3, 1e-4]),
+            lr_schedule=np.array([1e-4, 1e-5]),
             td_target_update_interval=1,
             compute_target_by_sfv=True,
             normalize_critic=True,
@@ -74,14 +74,14 @@ class SFGPIAgent(MultiTaskAgent):
             n_gauss=4,
             policy_regularization=1e-3,
             policy_lr=5e-4,
-            policy_lr_schedule=np.array([5e-3, 5e-4]),
+            policy_lr_schedule=np.array([5e-4, 5e-5]),
             delayed_policy_update=1,
             calc_pol_loss_by_advantage=True,
             entropy_tuning=True,
             alpha_bnd=np.array([0.5, 10]),
             net_kwargs={"value_sizes": [64, 64], "policy_sizes": [32, 32]},
             explore_with_gpe=True,
-            explore_with_gpe_after_n_round=3,
+            explore_with_gpe_after_n_round=0,
             task_schedule=None,
             train_nround=10,
             enable_curriculum_learning=False,
@@ -156,6 +156,7 @@ class SFGPIAgent(MultiTaskAgent):
         self.beta = 1 / self.mini_batch_size
 
         wandb.watch(self.sfs[0])
+        wandb.watch(self.pols[0])
 
     def run(self):
         while True:
@@ -284,6 +285,7 @@ class SFGPIAgent(MultiTaskAgent):
                 "state/lr": self.lr,
                 "state/entropy": entropy.detach().mean().item(),
                 "task/task_idx": self.task_idx,
+                "task/step": self.steps,
             }
             if self.entropy_tuning:
                 metrics.update(
@@ -337,14 +339,17 @@ class SFGPIAgent(MultiTaskAgent):
         pg_loss = self.beta * pg_loss
         return pg_loss
 
-    def calc_pol_loss(self, batch, sf_tar_net, pol_net, weights):
+    def calc_pol_loss(self, batch, sf_tar_net, pol_net, weights, task=None):
+        if task is None:
+            task = self.w
+
         (obs, _, _, _, _, _) = batch
 
         act, entropy, _ = pol_net(obs)
-        q = self.calc_q_from_sf(obs, act, sf_tar_net, self.w)
+        q = self.calc_q_from_sf(obs, act, sf_tar_net, task)
 
         if self.calc_pol_loss_by_advantage:
-            v = self.calc_v_from_sf(obs, sf_tar_net, self.w)
+            v = self.calc_v_from_sf(obs, sf_tar_net, task)
             q = q - v
 
         loss = torch.mean((-q - self.alpha * entropy) * weights) + self.reg_loss(
@@ -389,7 +394,7 @@ class SFGPIAgent(MultiTaskAgent):
 
     def calc_target_sfv(self, next_obs, features, dones, sf_target):
         with torch.no_grad():
-            next_sf0, next_sf1 = self.calc_sf_value_by_random_actions(
+            next_sf0, next_sf1, _, _ = self.calc_sf_value_by_random_actions(
                 next_obs, sf_target
             )
             next_sf = torch.min(next_sf0, next_sf1)
@@ -413,7 +418,7 @@ class SFGPIAgent(MultiTaskAgent):
 
     def calc_v_from_sf(self, obs, sf_tar_net, w):
         with torch.no_grad():
-            sf0, sf1 = self.calc_sf_value_by_random_actions(obs, sf_tar_net)
+            sf0, sf1, _, _ = self.calc_sf_value_by_random_actions(obs, sf_tar_net)
             q0 = self.get_q_from_sf_w(sf0, w)
             q1 = self.get_q_from_sf_w(sf1, w)
             q = torch.min(q0, q1)
@@ -446,7 +451,7 @@ class SFGPIAgent(MultiTaskAgent):
         sample_obs, sample_act = get_sa_pairs(obs, sample_act)
         sf0, sf1 = sf_tar_net(sample_obs, sample_act)
         assert_shape(sf0, [None, self.feature_dim])
-        return sf0, sf1
+        return sf0, sf1, sample_obs, sample_act
 
     def calc_normalized_grad(self, net, q, target_q, v, weights):
         # apply critic normalization trick,
@@ -569,11 +574,13 @@ class TEACHER_SFGPI(SFGPIAgent):
         self.pretrain_sf_epochs = config.get("pretrain_sf_epochs", 1e4)
 
         self.enable_tsf = config.get("enable_tsf", True)
-        self.train_tsf = self.enable_tsf
         self.teachers = [AttitudePID(), PositionPID()]
 
         self.enable_reset_ctrl = config.get("enable_reset_controller", True)
         self.reset_ctrl = PositionPID()
+
+        self.train_tsf = self.enable_tsf
+        self.expert_supervise_loss = self.enable_tsf
 
         self.tsfs, self.tsf_tars, self.tsf_optims = [], [], []
         for _ in range(len(self.teachers)):
@@ -592,7 +599,7 @@ class TEACHER_SFGPI(SFGPIAgent):
         if self.train_tsf:
             for i in range(len(self.teachers)):
                 print(f"========= train teacher_sf {i} =========")
-                self.enable_reset_ctrl = True if i == 0 else False
+                # self.enable_reset_ctrl = True if i == 0 else False
                 self.tidx = i
                 while True:
                     self.train_episode()
@@ -690,7 +697,7 @@ class TEACHER_SFGPI(SFGPIAgent):
             weights = 1
 
         i = self.tidx
-        (tsf_loss, errors, mean_tsf, target_tsf, mean_sfv) = self.calc_sf_loss(
+        tsf_loss, errors, mean_tsf, target_tsf, mean_sfv = self.calc_sf_loss(
             batch, self.tsfs[i], self.tsf_tars[i], self.teachers[i], weights
         )
         update_params(
@@ -717,53 +724,88 @@ class TEACHER_SFGPI(SFGPIAgent):
                 metrics[f"task/{i}"] = w[i]
             wandb.log(metrics)
 
-    def pretrain_student(self, idx=0):
-        for i in range(len(self.tsfs)):  # TODO: teacher more than student case
-            hard_update(self.sfs[i], self.tsfs[i])
-            hard_update(self.sf_tars[i], self.tsf_tars[i])
-        self.pretrain_pol(idx, self.pretrain_sf_epochs)
+    def calc_sf_loss(self, batch, sf_net, sf_target_net, pol, weights):
+        (tsf_loss, errors, mean_tsf, target_tsf, mean_sfv) = super().calc_sf_loss(
+            batch, sf_net, sf_target_net, pol, weights
+        )
 
-    def pretrain_pol(self, task_idx, pretrain_epochs=1e3):
-        i = task_idx
-        w = self.task_to_w(self.task_schedule[i])
-        w = torch.tensor(w, dtype=torch.float32).to(device)
-        for epoch in range(int(pretrain_epochs)):
-            if self.prioritized_memory:
-                batch, indices, weights = self.replay_buffer.sample(
-                    self.mini_batch_size
-                )
-            else:
-                batch = self.replay_buffer.sample(self.mini_batch_size)
-                weights = 1
+        if self.expert_supervise_loss:
+            (obs, _, act, _, _, _) = batch
 
-            pol_loss, entropy = self.calc_pol_loss(
-                batch, self.sf_tars[i], self.pols[i], weights
+            tiled_obs = torch.tile(obs, (1, self.n_particles)).reshape(
+                -1, self.observation_dim
             )
-            update_params(self.pol_optims[i], self.pols[i], pol_loss, self.grad_clip)
+            tiled_act = torch.tile(act, (1, self.n_particles)).reshape(
+                -1, self.action_dim
+            )
 
-            if self.entropy_tuning:
-                entropy_loss = self.update_alpha(weights, entropy)
+            sf0, sf1 = self.get_cur_sf(sf_target_net, tiled_obs, tiled_act)
+            expert_sf = torch.min(sf0, sf1)
+
+            (
+                sampled_sf0,
+                sampled_sf1,
+                _,
+                sampled_act,
+            ) = self.calc_sf_value_by_random_actions(obs, sf_net)
+            margin = self.calc_margin(tiled_act, sampled_act)
+
+            sup_loss0 = sampled_sf0 + margin - expert_sf
+            sup_loss1 = sampled_sf1 + margin - expert_sf
+
+            sup_loss0 = torch.masked_select(sup_loss0, sup_loss0 > 0).mean()
+            sup_loss1 = torch.masked_select(sup_loss1, sup_loss1 > 0).mean()
+
+            tsf_loss0 = tsf_loss[0]
+            tsf_loss1 = tsf_loss[1]
+
+            tsf_loss0 = tsf_loss0 + sup_loss0
+            tsf_loss1 = tsf_loss1 + sup_loss1
+
+            if self.learn_steps % self.log_interval == 0:
+                supervise_loss = sup_loss0.detach().mean().item()
+                wandb.log({"pretrain/supervise_loss": supervise_loss})
+
+            return (tsf_loss0, tsf_loss1), errors, mean_tsf, target_tsf, mean_sfv
+
+        else:
+            return tsf_loss, errors, mean_tsf, target_tsf, mean_sfv
+
+    def calc_margin(self, expert_action, sampled_action, scale=100):
+        norm = torch.norm(expert_action - sampled_action, dim=1)
+        norm = norm.unsqueeze(1)
+        return scale * norm
+
+    def pretrain_student(self, idx=0):
+        self.expert_supervise_loss = True
+
+        self.update_task_by_task_index(idx)
+        for epoch in range(int(self.pretrain_sf_epochs)):
+            self.learn()
 
             if epoch % self.log_interval == 0:
+                if self.prioritized_memory:
+                    batch, _, _ = self.replay_buffer.sample(self.mini_batch_size)
+                else:
+                    batch = self.replay_buffer.sample(self.mini_batch_size)
+
                 with torch.no_grad():
                     (obs, _, _, _, _, _) = batch
-                    _, _, act = self.pols[i](obs)
+                    _, _, act = self.pols[idx](obs)
                     tact0 = self.teachers[0].act(obs)
                     tact1 = self.teachers[1].act(obs)
-                    q = self.calc_q_from_sf(obs, act, self.sf_tars[i], w)
+                    q = self.calc_q_from_sf(obs, act, self.sf_tars[idx], self.w)
 
                 metrics = {
-                    f"pretrain/loss{i}": pol_loss,
-                    f"pretrain/q_value{i}": q.mean().item(),
-                    f"pretrain/act{i}": act,
+                    f"pretrain/q_value{idx}": q.mean().item(),
+                    f"pretrain/act{idx}": act,
                     f"pretrain/tact0": tact0,
                     f"pretrain/tact1": tact1,
                 }
-
-                if self.entropy_tuning:
-                    metrics["pretrain/entropy_loss"] = entropy_loss
-
                 wandb.log(metrics)
+
+        self.update_task_by_task_index(0)  # reset task
+        self.expert_supervise_loss = False
 
     def set_safe_goal(self):
         print("set safe goal")
@@ -875,14 +917,12 @@ if __name__ == "__main__":
 
     Agent = SFGPIAgent  # SFGPIAgent, TEACHER_SFGPI
 
-    env = "myInvertedDoublePendulum-v4"  # "multitask-v0", "myInvertedDoublePendulum-v4"
+    env = "multitask-v0"  # "multitask-v0", "myInvertedDoublePendulum-v4"
     render = False
     auto_start_simulation = False
     if auto_start_simulation:
         close_simulation()
 
-    env_kwargs = {}
-    task_schedule = None
     if env == "multitask-v0":
         from agent.task_config import get_task_schedule
 
@@ -894,10 +934,10 @@ if __name__ == "__main__":
                 "position": (0, 0, 25),  # initial spawned position
             },
             "observation": {
-                "noise_stdv": 0.0,
+                "noise_stdv": 0.02,
             },
             "action": {
-                "act_noise_stdv": 0.0,
+                "act_noise_stdv": 0.02,
                 "thrust_range": [-0.2, 0.2],
             },
             "target": {"type": "FixedGoal"},
@@ -905,8 +945,11 @@ if __name__ == "__main__":
         env_kwargs = {"config": env_config}
         task_schedule = get_task_schedule(
             # ["roll", "pitch", "yaw", "att", "z", "xz", "yz", "xyz"]
-            ["att", "z", "xz", "yz", "xyz"]
+            ["att", "z"]
         )
+    else:
+        env_kwargs = {}
+        task_schedule = None
 
     default_dict = Agent.default_config()
     default_dict.update(
@@ -915,17 +958,20 @@ if __name__ == "__main__":
             env_kwargs=env_kwargs,
             render=render,
             min_batch_size=int(256),  # 256
-            min_n_experience=int(2048),  # 2048
+            min_n_experience=int(0),  # 0 if enable_tsf else 2048
             total_timesteps=1e6,  # 1e6
+            updates_per_step=2,
+            multi_step=2,
             train_nround=20,  # 20
-            pretrain_sf_epochs=5e3,  # 5e3
-            n_teacher_steps=int(5e4),
+            pretrain_sf_epochs=1e4,  # 1e4
+            n_teacher_steps=int(5e3),  # 5e3
             entropy_tuning=True,
-            normalize_critic=True,
+            normalize_critic=False,
             compute_target_by_sfv=True,
             enable_curriculum_learning=True,
             enable_tsf=False,
             enable_reset_controller=False,
+            explore_with_gpe_after_n_round=3,
             policy_class="Gaussian",
             net_kwargs={"value_sizes": [256, 256], "policy_sizes": [32, 32]},
             task_schedule=task_schedule,

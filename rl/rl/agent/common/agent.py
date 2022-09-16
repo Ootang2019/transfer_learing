@@ -499,6 +499,17 @@ class MultiTaskAgent(BasicAgent):
                 w = self.env.w
                 self.update_task_by_task_weight(w)
 
+    def update_task_by_task_index(self, task_idx):
+        # only available when task_schedule exists
+        self.task_idx = task_idx
+        if self.task_schedule is not None:
+            try:
+                task = self.task_schedule[self.task_idx]
+                self.update_task_by_task_dict(task)
+            except:
+                w = self.task_schedule[self.task_idx]
+                self.update_task_by_task_weight(w)
+
     def update_task_by_task_dict(self, task):
         """update task by task dictionary"""
         w = self.task_to_w(task)

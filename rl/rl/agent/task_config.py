@@ -1,6 +1,8 @@
 import numpy as np
 import copy
 
+# note: all values must be positive
+
 base_task = {
     "tracking": {
         "ori_diff": np.array([0.0, 0.0, 0.0, 0.0]),
@@ -64,7 +66,7 @@ xyz_ctrl_task["constraint"].update(
 xyz_ctrl_task["success"].update(
     {
         "pos": np.array([10.0, 10.0, 10.0]),
-        "fail": np.array([-10.0]),
+        "fail": np.array([10.0]),
     }
 )
 

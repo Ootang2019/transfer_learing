@@ -21,7 +21,7 @@ class MultiTaskEnv(BaseEnv):
         config = super().default_config()
         config["simulation"].update(
             {
-                "simulation_time_step": 0.005,  # 0.001 or 0.005 for 5x speed
+                "simulation_time_step": 0.004,  # 0.001 or 0.005 for 5x speed
             }
         )
         config["observation"].update(
@@ -51,7 +51,7 @@ class MultiTaskEnv(BaseEnv):
                 "duration": 1500,  # [steps]
                 "simulation_frequency": 50,  # [hz]
                 "policy_frequency": 25,  # [hz]
-                "position_success_threshhold": 1,  # [meters]
+                "position_success_threshhold": 0.5,  # [meters]
                 "attitude_success_threshhold": 0.02,  # [rad]
                 "tasks": {
                     "tracking": {
@@ -71,7 +71,7 @@ class MultiTaskEnv(BaseEnv):
                     "success": {
                         "att": np.array([10.0, 10.0, 10.0]),
                         "pos": np.array([10.0, 10.0, 10.0]),
-                        "fail": np.array([-10.0]),
+                        "fail": np.array([10.0]),
                     },  # x,y,z
                 },
                 "angle_reset": True,  # reset env if roll and pitch too large
@@ -332,7 +332,7 @@ class MultiTaskEnv(BaseEnv):
         success = self.time_in_success_region(value, -success_bnd, success_bnd)
         return success
 
-    def time_in_success_region(self, val, val_lbnd, val_ubnd, time=5):
+    def time_in_success_region(self, val, val_lbnd, val_ubnd, time=3):
         if (val > val_lbnd).all() and (val < val_ubnd).all():
             self.success_timer += 1
         else:
