@@ -11,6 +11,9 @@ class BaseNetwork(nn.Module):
     def load(self, path):
         self.load_state_dict(torch.load(path))
 
+    def reg_loss(self):
+        return 0
+
 
 class QNetwork(BaseNetwork):
     def __init__(
@@ -149,23 +152,11 @@ class SFNetwork(BaseNetwork):
     def forward(self, observations, actions):
         observations = check_dim(observations, self.observation_dim)
         actions = check_dim(actions, self.action_dim)
-
         x = torch.cat([observations, actions], dim=1)
         x = self.activation(self.ln1(self.fc1(x)))
         x = self.activation(self.ln2(self.fc2(x)))
         x = self.fc3(x)
         return x
-
-    def forward_chi(self, observations, chi):
-        target = torch.cat(
-            [
-                self.forward(observations, chi[:, i].unsqueeze(1))
-                for i in range(self.feature_dim)
-            ],
-            1,
-        )
-        mask = [i * (self.feature_dim + 1) for i in range(self.feature_dim)]
-        return target[:, mask]
 
 
 class TwinnedSFNetwork(BaseNetwork):
@@ -191,7 +182,106 @@ class TwinnedSFNetwork(BaseNetwork):
         sf1 = self.SF1(observations, actions)
         return sf0, sf1
 
+
+class ChiNetwork(SFNetwork):
     def forward_chi(self, observations, chi):
-        target1 = self.SF0.forward_chi(observations, chi)
-        target2 = self.SF1.forward_chi(observations, chi)
+        target = torch.cat(
+            [
+                self.forward(observations, chi[:, i].unsqueeze(1))
+                for i in range(self.feature_dim)
+            ],
+            1,
+        )
+        mask = [i * (self.feature_dim + 1) for i in range(self.feature_dim)]
+        return target[:, mask]
+
+
+class TwinnedChiNetwork(TwinnedSFNetwork):
+    def __init__(
+        self,
+        observation_dim,
+        feature_dim,
+        action_dim,
+        sizes=[64, 64],
+        activation=nn.SiLU,
+    ):
+        super().__init__(observation_dim, feature_dim, action_dim, sizes, activation)
+
+        self.CHI0 = ChiNetwork(
+            observation_dim, feature_dim, action_dim, sizes, activation
+        )
+        self.CHI1 = ChiNetwork(
+            observation_dim, feature_dim, action_dim, sizes, activation
+        )
+
+    def forward_chi(self, observations, chi):
+        target1 = self.CHI0.forward_chi(observations, chi)
+        target2 = self.CHI1.forward_chi(observations, chi)
         return target1, target2
+
+
+class MultiheadSFNetwork(SFNetwork):
+    def __init__(
+        self,
+        observation_dim,
+        feature_dim,
+        action_dim,
+        n_heads,
+        sizes=[64, 64],
+        activation=nn.SiLU,
+    ) -> None:
+        super().__init__()
+        self.observation_dim = observation_dim
+        self.feature_dim = feature_dim
+        self.action_dim = action_dim
+        self.sizes = sizes
+        self.n_heads = n_heads
+
+        self.fc1 = nn.Linear(self.observation_dim + self.action_dim, self.sizes[0])
+        self.ln1 = nn.LayerNorm(self.sizes[0])
+        self.fc2 = nn.Linear(self.sizes[0], self.sizes[1])
+        self.ln2 = nn.LayerNorm(self.sizes[1])
+        self.heads = []
+        self.activation = activation()
+
+        self.apply(self._init_weights)
+
+        for i in range(n_heads):
+            self.add_head(self.sizes[1], self.feature_dim)
+            nn.init.xavier_uniform_(self.heads[i].weight, 0.01)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight, 1)
+            if module.bias is not None:
+                module.bias.data.zero_()
+
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
+
+    def forward(self, observations, actions, head_idx):
+        observations = check_dim(observations, self.observation_dim)
+        actions = check_dim(actions, self.action_dim)
+        x = self._forward_hidden(observations, actions)
+        x = self.heads[head_idx](x)
+        return x
+
+    def _forward_hidden(self, observations, actions):
+        x = torch.cat([observations, actions], dim=1)
+        x = self.activation(self.ln1(self.fc1(x)))
+        x = self.activation(self.ln2(self.fc2(x)))
+        return x
+
+    def forward_heads(self, observations, actions):
+        sfs = []
+        x = self._forward_hidden(observations, actions)
+
+        for i in range(self.n_heads):
+            sf = self.heads[i](x)
+            sfs.append(sf)
+        return torch.stack(sfs)
+
+    def add_head(self, input_size, output_size):
+        head = nn.Linear(input_size, output_size)
+        self.heads.append(head)

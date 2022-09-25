@@ -1,3 +1,4 @@
+from turtle import forward
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -133,6 +134,11 @@ class GaussianPolicy(BaseNetwork):
         x = self.fc3(x)
         x = self.tanh(x) if self.squash else x
 
+        means, actions, entropy = self._forward(x)
+
+        return actions, entropy, torch.tanh(means)
+
+    def _forward(self, x):
         means, log_stds = torch.chunk(x, 2, dim=-1)
         log_stds = torch.clamp(log_stds, min=self.LOG_STD_MIN, max=self.LOG_STD_MAX)
 
@@ -144,11 +150,54 @@ class GaussianPolicy(BaseNetwork):
         # calculate entropies
         log_probs = normals.log_prob(xs) - torch.log(1 - actions.pow(2) + self.eps)
         entropy = -log_probs.sum(dim=1, keepdim=True)
-
-        return actions, entropy, torch.tanh(means)
+        return means, actions, entropy
 
     def sample(self, obs):
         return self.forward(obs)
+
+
+class MultiheadGaussianPolicy(GaussianPolicy):
+    def __init__(
+        self,
+        observation_dim,
+        action_dim,
+        n_heads,
+        sizes=[256, 256],
+        squash=True,
+        activation=nn.SiLU,
+    ):
+        super().__init__(observation_dim, action_dim, sizes, squash, activation)
+
+        self.n_heads = n_heads
+        self.heads = []
+        self.apply(self._init_weights)
+
+        for i in range(n_heads):
+            self.add_head(self.sizes[1], self.action_dim)
+            nn.init.xavier_uniform_(self.heads[i].weight, 0.0001)
+
+    def forward(self, obs, head_idx):
+        x = self.activ(self.fc1(obs))
+        x = self.activ(self.fc2(x))
+        x = self.heads[head_idx](x)
+        x = self.tanh(x) if self.squash else x
+
+        means, actions, entropy = self._forward(x)
+        return actions, entropy, torch.tanh(means)
+
+    def forward_heads(self, obs):
+        actions, entropies, mean_actions = [], [], []
+        for i in range(self.n_heads):
+            act, ent, mean_act = self.forward(obs, i)
+            actions.append(act)
+            entropies.append(ent)
+            mean_actions.append(mean_act)
+
+        return torch.stack(actions), torch.stack(entropies), torch.stack(mean_actions)
+
+    def add_head(self, input_size, output_size):
+        head = nn.Linear(input_size, output_size)
+        self.heads.append(head)
 
 
 class GMMPolicy(BaseNetwork):

@@ -459,8 +459,11 @@ class MultiTaskAgent(BasicAgent):
 
     def post_all_tasks_process(self):
         if self.enable_curriculum_learning:
-            m = np.power(self.train_nround, 1 / (self.train_nround - 1))
-            self.update_goal_range(m)
+            self.curriculum()
+
+    def curriculum(self):
+        m = np.power(self.train_nround, 1 / (self.train_nround - 1))
+        self.update_goal_range(m)
 
     def update_goal_range(self, scale=1):
         self.goal_range = {k: np.array(v) * scale for k, v in self.goal_range.items()}

@@ -46,7 +46,7 @@ class GaussianMixture(torch.nn.Module):
         self._N_pl = 0
 
         self.apply(self._init_weights)
-        nn.init.xavier_uniform_(self.fc3.weight, 0.01)
+        nn.init.xavier_uniform_(self.fc3.weight, 0.0001)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
