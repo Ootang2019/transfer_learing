@@ -2,7 +2,7 @@ from turtle import forward
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .util import get_sa_pairs
+from .util import get_sa_pairs, np2ts
 from .distribution import GaussianMixture
 import numpy as np
 from torch.distributions import Normal
@@ -168,36 +168,59 @@ class MultiheadGaussianPolicy(GaussianPolicy):
     ):
         super().__init__(observation_dim, action_dim, sizes, squash, activation)
 
+        self.lstm = torch.nn.LSTM(self.sizes[0], self.sizes[0])
+
         self.n_heads = n_heads
-        self.heads = []
-        self.apply(self._init_weights)
+        self.head_ls = []
+        for _ in range(n_heads):
+            self._add_head(self.sizes[1], self.action_dim)
+        self._update_heads()
 
-        for i in range(n_heads):
-            self.add_head(self.sizes[1], self.action_dim)
-            nn.init.xavier_uniform_(self.heads[i].weight, 0.0001)
-
-    def forward(self, obs, head_idx):
-        x = self.activ(self.fc1(obs))
-        x = self.activ(self.fc2(x))
+    def forward(self, obs, hidden, head_idx):
+        x, hidden_out = self._forward_hidden(obs, hidden)
         x = self.heads[head_idx](x)
         x = self.tanh(x) if self.squash else x
-
         means, actions, entropy = self._forward(x)
-        return actions, entropy, torch.tanh(means)
+        return actions, entropy, torch.tanh(means), hidden_out
 
-    def forward_heads(self, obs):
+    def forward_heads(self, obs, hidden):
         actions, entropies, mean_actions = [], [], []
+        hidden_x, hidden_lstm = self._forward_hidden(obs, hidden)
         for i in range(self.n_heads):
-            act, ent, mean_act = self.forward(obs, i)
+            x = self.heads[i](hidden_x)
+            x = self.tanh(x) if self.squash else x
+            mean_act, act, ent = self._forward(x)
+
             actions.append(act)
             entropies.append(ent)
             mean_actions.append(mean_act)
 
-        return torch.stack(actions), torch.stack(entropies), torch.stack(mean_actions)
+        return (
+            torch.stack(actions),
+            torch.stack(entropies),
+            torch.stack(mean_actions),
+            hidden_lstm,
+        )
 
-    def add_head(self, input_size, output_size):
+    def _forward_hidden(self, obs, hidden):
+        x = self.activ(self.fc1(obs))
+        x, hidden_out = self.lstm(x, hidden)
+        x = self.activ(self.fc2(x))
+        return x, hidden_out
+
+    def add_heads(self, output_size):
+        self._add_head(self.sizes[1], output_size)
+        self._update_heads()
+        head_idx = len(self.head_ls)
+        return head_idx
+
+    def _add_head(self, input_size, output_size):
         head = nn.Linear(input_size, output_size)
-        self.heads.append(head)
+        nn.init.xavier_uniform_(head.weight, 0.0001)
+        self.head_ls.append(head)
+
+    def _update_heads(self):
+        self.heads = nn.ModuleList(self.head_ls)
 
 
 class GMMPolicy(BaseNetwork):

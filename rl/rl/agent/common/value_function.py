@@ -1,7 +1,7 @@
 from numpy import argmax
 import torch
 import torch.nn as nn
-from .util import check_dim
+from .util import check_dim, np2ts
 
 
 class BaseNetwork(nn.Module):
@@ -230,47 +230,17 @@ class MultiheadSFNetwork(SFNetwork):
         sizes=[64, 64],
         activation=nn.SiLU,
     ) -> None:
-        super().__init__()
-        self.observation_dim = observation_dim
-        self.feature_dim = feature_dim
-        self.action_dim = action_dim
-        self.sizes = sizes
+        super().__init__(observation_dim, feature_dim, action_dim, sizes, activation)
+
         self.n_heads = n_heads
-
-        self.fc1 = nn.Linear(self.observation_dim + self.action_dim, self.sizes[0])
-        self.ln1 = nn.LayerNorm(self.sizes[0])
-        self.fc2 = nn.Linear(self.sizes[0], self.sizes[1])
-        self.ln2 = nn.LayerNorm(self.sizes[1])
-        self.heads = []
-        self.activation = activation()
-
-        self.apply(self._init_weights)
-
-        for i in range(n_heads):
-            self.add_head(self.sizes[1], self.feature_dim)
-            nn.init.xavier_uniform_(self.heads[i].weight, 0.01)
-
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight, 1)
-            if module.bias is not None:
-                module.bias.data.zero_()
-
-        elif isinstance(module, nn.LayerNorm):
-            module.bias.data.zero_()
-            module.weight.data.fill_(1.0)
+        self.head_ls = []
+        for _ in range(n_heads):
+            self._add_head(self.sizes[1], self.feature_dim)
+        self._update_heads()
 
     def forward(self, observations, actions, head_idx):
-        observations = check_dim(observations, self.observation_dim)
-        actions = check_dim(actions, self.action_dim)
         x = self._forward_hidden(observations, actions)
         x = self.heads[head_idx](x)
-        return x
-
-    def _forward_hidden(self, observations, actions):
-        x = torch.cat([observations, actions], dim=1)
-        x = self.activation(self.ln1(self.fc1(x)))
-        x = self.activation(self.ln2(self.fc2(x)))
         return x
 
     def forward_heads(self, observations, actions):
@@ -282,6 +252,25 @@ class MultiheadSFNetwork(SFNetwork):
             sfs.append(sf)
         return torch.stack(sfs)
 
-    def add_head(self, input_size, output_size):
+    def _forward_hidden(self, observations, actions):
+        observations = check_dim(observations, self.observation_dim)
+        actions = check_dim(actions, self.action_dim)
+
+        x = torch.cat([observations, actions], dim=1)
+        x = self.activation(self.ln1(self.fc1(x)))
+        x = self.activation(self.ln2(self.fc2(x)))
+        return x
+
+    def add_heads(self, output_size):
+        self._add_head(self.sizes[1], output_size)
+        self._update_heads()
+        head_idx = len(self.head_ls) - 1
+        return head_idx
+
+    def _add_head(self, input_size, output_size):
         head = nn.Linear(input_size, output_size)
-        self.heads.append(head)
+        nn.init.xavier_uniform_(head.weight, 0.01)
+        self.head_ls.append(head)
+
+    def _update_heads(self):
+        self.heads = nn.ModuleList(self.head_ls)
