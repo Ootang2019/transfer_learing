@@ -9,13 +9,14 @@ import torch.nn.functional as F
 from torch.optim import Adam
 
 import wandb
-from agent.common.agent import MultiTaskAgent
-from agent.common.policy import MultiheadGaussianPolicy
+from agent.common.agent import MultiTaskRNNAgent
+from agent.common.policy import MultiheadGaussianRNNPolicy
 from agent.common.teacher import AttitudePID, PositionPID
 from agent.common.util import (
     assert_shape,
     check_dim,
     get_sa_pairs,
+    get_sah_pairs,
     grad_false,
     hard_update,
     linear_schedule,
@@ -25,7 +26,7 @@ from agent.common.util import (
     update_learning_rate,
     update_params,
 )
-from agent.common.value_function import MultiheadSFNetwork
+from agent.common.value_function import MultiheadSFRNNNetwork
 
 # disable api to speed up
 api = False
@@ -39,7 +40,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 EPS = 1e-6
 
 
-class SFGPIAgent(MultiTaskAgent):
+class SFGPIAgent(MultiTaskRNNAgent):
     """GPI
     Andre Barreto, Transfer in Deep Reinforcement Learning Using
         Successor Features and Generalised Policy Improvement
@@ -79,8 +80,8 @@ class SFGPIAgent(MultiTaskAgent):
             auxiliary_task=False,
             alpha_bnd=np.array([0.5, 10]),
             net_kwargs={
-                "value_sizes": [64, 64],
                 "policy_sizes": [32, 32],
+                "value_sizes": [64, 64],
             },
             explore_with_gpe=True,
             explore_with_gpe_after_n_round=0,
@@ -100,6 +101,8 @@ class SFGPIAgent(MultiTaskAgent):
         config: dict = {},
     ) -> None:
         self.config = config
+        self.config["rnn_hidden_shape0"] = config["net_kwargs"]["policy_sizes"][0]
+        self.config["rnn_hidden_shape1"] = config["net_kwargs"]["value_sizes"][0]
         super().__init__(**config)
 
         self.explore_with_gpe_after_n_round = config.get(
@@ -155,14 +158,14 @@ class SFGPIAgent(MultiTaskAgent):
         wandb.watch(self.policy)
 
     def create_sf_policy(self):
-        self.sf = MultiheadSFNetwork(
+        self.sf = MultiheadSFRNNNetwork(
             observation_dim=self.observation_dim,
             feature_dim=self.feature_dim,
             action_dim=self.action_dim,
             n_heads=self.n_tasks,
             sizes=self.net_kwargs.get("value_sizes", [64, 64]),
         )
-        self.sf_target = MultiheadSFNetwork(
+        self.sf_target = MultiheadSFRNNNetwork(
             observation_dim=self.observation_dim,
             feature_dim=self.feature_dim,
             action_dim=self.action_dim,
@@ -182,7 +185,7 @@ class SFGPIAgent(MultiTaskAgent):
             self.sf.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
 
-        self.policy = MultiheadGaussianPolicy(
+        self.policy = MultiheadGaussianRNNPolicy(
             observation_dim=self.observation_dim,
             action_dim=self.action_dim,
             n_heads=self.n_tasks,
@@ -199,50 +202,6 @@ class SFGPIAgent(MultiTaskAgent):
                 break
             if self.steps > self.total_timesteps:
                 break
-
-    def train_episode(self):
-        if self.task_schedule is not None:
-            self.change_task()
-
-        episode_reward = 0
-        self.episodes += 1
-        episode_steps = 0
-        done = False
-        obs, feature = self.reset_env()
-        layer_sizes = self.net_kwargs.get("policy_sizes")
-        h_out = (
-            torch.zeros([1, 1, layer_sizes[0]], dtype=torch.float),
-            torch.zeros([1, 1, layer_sizes[0]], dtype=torch.float),
-        )
-        while not done:
-            self.render_env()
-
-            action = self.act(obs)
-            next_obs, reward, done, info = self.env.step(action)
-            next_feature = info["features"]
-            masked_done = False if episode_steps >= self.max_episode_steps else done
-
-            self.steps += 1
-            episode_steps += 1
-            episode_reward += reward
-
-            self.save_to_buffer(
-                done, obs, feature, action, next_obs, reward, masked_done
-            )
-            if self.is_update():
-                for _ in range(self.updates_per_step):
-                    self.learn()
-
-            obs = next_obs
-            feature = next_feature
-
-        if self.episodes % self.log_interval == 0:
-            self.log_training(episode_reward, episode_steps, info)
-
-        if self.eval and (self.episodes % self.eval_interval == 0):
-            self.evaluate()
-
-        self.post_episode_process()
 
     def post_episode_process(self):
         self.update_lr()
@@ -283,39 +242,41 @@ class SFGPIAgent(MultiTaskAgent):
             self.pol_lr = linear_schedule(steps, budget_per_task, self.pol_lr_schedule)
             update_learning_rate(self.policy_optimizer, self.pol_lr)
 
-    def explore(self, obs, w):
+    def explore(self, obs, h_in0, h_in1, w):
         if self.explore_with_gpe:
-            acts, qs = self.gpe(obs, w, "explore")
-            act = self.gpi(acts, qs)
+            acts, qs, h_out0, h_out1 = self.gpe(obs, h_in0, h_in1, w, "explore")
+            act, h_out1 = self.gpi(acts, qs, h_out1)
         else:
-            act, _, _ = self.policy(obs, self.task_idx)
-        return act
+            act, _, _, h_out0 = self.policy(obs, h_in0, self.task_idx)
+            h_out1 = self.init_rnn_hidden1
+        return act, h_out0, h_out1
 
-    def exploit(self, obs, w):
-        acts, qs = self.gpe(obs, w, "exploit")
-        act = self.gpi(acts, qs)
-        return act
+    def exploit(self, obs, h_in0, h_in1, w):
+        acts, qs, h_out0, h_out1 = self.gpe(obs, h_in0, h_in1, w, "exploit")
+        act, h_out1 = self.gpi(acts, qs, h_out1)
+        return act, h_out0, h_out1
 
-    def gpe(self, obs, w, mode):
+    def gpe(self, obs, h_in0, h_in1, w, mode):
         if mode == "explore":
-            acts, _, _ = self.policy.forward_heads(obs)
+            acts, _, _, h_out0 = self.policy.forward_heads(obs, h_in0)
         elif mode == "exploit":
-            _, _, acts = self.policy.forward_heads(obs)
+            _, _, acts, h_out0 = self.policy.forward_heads(obs, h_in0)
 
-        sa = get_sa_pairs(obs, acts)
+        sah = get_sah_pairs(obs, acts, h_in1)
 
-        sfs = self.sf_target.forward_heads(*sa)
+        sfs, h_out1 = self.sf_target.forward_heads(*sah)
         assert_shape(sfs, [None, self.n_tasks, self.feature_dim])
 
         qs = self.reward_scale * torch.matmul(sfs, w)  # (n_head, n_act, act_dim)
         assert_shape(qs, [None, self.n_tasks])
 
-        return acts, qs
+        return acts, qs, h_out0, h_out1
 
-    def gpi(self, acts, qs):
+    def gpi(self, acts, qs, h_out1):
         idx = torch.argmax(qs) % self.n_tasks
         act = acts[idx].squeeze()
-        return act
+        h_out1 = h_out1[:, idx].view(1, 1, -1)
+        return act, h_out1
 
     def learn(self):
         self.learn_steps += 1
@@ -370,14 +331,16 @@ class SFGPIAgent(MultiTaskAgent):
         return entropy_loss
 
     def calc_sf_loss(self, batch, weights):
-        (obs, features, acts, _, next_obs, dones) = batch
+        (obs, features, acts, _, next_obs, dones, h_in0, h_out0, h_in1, h_out1) = batch
 
-        cur_sf = self.get_cur_sf(obs, acts)
-        td_target, _ = self.calc_td_target(features, next_obs, dones)
+        cur_sf = self.get_cur_sf(obs, acts, h_in1)
+        td_target, _ = self.calc_td_target(features, next_obs, dones, h_in0, h_out1)
         sf_loss = torch.mean((cur_sf - td_target).pow(2) * weights)
 
         if self.auxiliary_task:
-            feature_pred_loss = self.aux_feature_predict_loss(obs, acts, features)
+            feature_pred_loss = self.aux_feature_predict_loss(
+                obs, acts, features, h_in1
+            )
             sf_loss = sf_loss + feature_pred_loss
             mean_feature_pred_loss = feature_pred_loss.detach().item()
         else:
@@ -390,19 +353,19 @@ class SFGPIAgent(MultiTaskAgent):
 
         return sf_loss, errors, mean_sf, mean_td_target, mean_feature_pred_loss
 
-    def aux_feature_predict_loss(self, obs, act, feature):
-        predicted_feature = self.get_cur_sf(obs, act, self.aux_pred_feature_task_idx)
+    def aux_feature_predict_loss(self, obs, act, feature, h):
+        predicted_feature = self.get_cur_sf(obs, act, h, self.aux_pred_feature_task_idx)
         loss = torch.mean((predicted_feature - feature).pow(2))
         return loss
 
     def calc_pol_loss(self, batch, weights):
-        (obs, _, _, _, _, _) = batch
+        (obs, _, _, _, _, _, h_in0, _, h_in1, _) = batch
 
-        act, entropy, _ = self.policy(obs, self.task_idx)
-        q = self.calc_q_from_sf(obs, act)
+        act, entropy, _, _ = self.policy(obs, h_in0, self.task_idx)
+        q = self.calc_q_from_sf(obs, act, h_in1)
 
         if self.calc_pol_loss_by_advantage:
-            v = self.calc_v_from_sf(obs)
+            v = self.calc_v_from_sf(obs, h_in1)
             q = q - v
 
         loss = torch.mean((-q - self.alpha * entropy) * weights) + self.reg_loss(
@@ -416,44 +379,40 @@ class SFGPIAgent(MultiTaskAgent):
         )
         return entropy_loss
 
-    def get_cur_sf(self, obs, actions, task_idx=None):
+    def get_cur_sf(self, obs, actions, h_in, task_idx=None):
         if task_idx is None:
-            cur_sf = self.sf(obs, actions, self.task_idx)
+            cur_sf, h_out = self.sf(obs, actions, h_in, self.task_idx)
         else:
-            cur_sf = self.sf(obs, actions, task_idx)
+            cur_sf, h_out = self.sf(obs, actions, h_in, task_idx)
+
         assert_shape(cur_sf, [None, self.feature_dim])
         return cur_sf
 
-    def get_target_sf(self, obs, act):
-        target_sf = self.sf_target(obs, act, self.task_idx)
+    def get_target_sf(self, obs, act, h_in):
+        target_sf, h_out = self.sf_target(obs, act, h_in, self.task_idx)
         assert_shape(target_sf, [None, self.feature_dim])
         return target_sf
 
-    def calc_td_target(self, features, next_observations, dones):
+    def calc_td_target(self, features, next_observations, dones, h_in0, h_out1):
         features = check_dim(features, self.feature_dim)
 
         if self.calc_target_by_sfv:
             td_target, next_sf = self.calc_sfv_td_target(
-                next_observations, features, dones
+                next_observations, features, dones, h_out1
             )
         else:
             td_target, next_sf = self.calc_sf_td_target(
-                next_observations, features, dones
+                next_observations,
+                features,
+                dones,
+                h_in0,
+                h_out1,
             )
         return td_target, next_sf
 
-    def calc_sf_td_target(self, next_obs, features, dones):
+    def calc_sfv_td_target(self, next_obs, features, dones, h_out1):
         with torch.no_grad():
-            _, _, next_act = self.policy(next_obs, self.task_idx)
-            next_sf = self.get_target_sf(next_obs, next_act)
-
-            td_target = features + (1 - dones) * self.gamma * next_sf
-            assert_shape(td_target, [None, self.feature_dim])
-        return td_target, next_sf
-
-    def calc_sfv_td_target(self, next_obs, features, dones):
-        with torch.no_grad():
-            next_sf, _, _ = self.calc_sf_value_by_random_actions(next_obs)
+            next_sf, _, _ = self.calc_sf_value_by_random_actions(next_obs, h_out1)
             next_sf = next_sf.view(-1, self.n_particles, self.feature_dim)
             next_sfv = self.log_mean_exp(next_sf)
             assert_shape(next_sfv, [None, self.feature_dim])
@@ -462,16 +421,25 @@ class SFGPIAgent(MultiTaskAgent):
             assert_shape(td_target, [None, self.feature_dim])
         return td_target, next_sfv
 
-    def calc_q_from_sf(self, obs, act):
-        sf = self.get_cur_sf(obs, act)
+    def calc_sf_td_target(self, next_obs, features, dones, h_in0, h_out1):
+        with torch.no_grad():
+            _, _, next_act, _ = self.policy(next_obs, h_in0, self.task_idx)
+            next_sf = self.get_target_sf(next_obs, next_act, h_out1)
+
+            td_target = features + (1 - dones) * self.gamma * next_sf
+            assert_shape(td_target, [None, self.feature_dim])
+        return td_target, next_sf
+
+    def calc_q_from_sf(self, obs, act, h):
+        sf = self.get_cur_sf(obs, act, h)
         q = self.get_q_from_sf_w(sf)
         q = q[:, None]
         assert_shape(q, [None, 1])
         return q
 
-    def calc_v_from_sf(self, obs):
+    def calc_v_from_sf(self, obs, h):
         with torch.no_grad():
-            sf, _, _ = self.calc_sf_value_by_random_actions(obs)
+            sf, _, _ = self.calc_sf_value_by_random_actions(obs, h)
             q = self.get_q_from_sf_w(sf)
             q = q.view(-1, self.n_particles)
             assert_shape(q, [None, self.n_particles])
@@ -481,14 +449,14 @@ class SFGPIAgent(MultiTaskAgent):
             assert_shape(v, [None, 1])
         return v
 
-    def calc_sf_value_by_random_actions(self, obs):
+    def calc_sf_value_by_random_actions(self, obs, h):
         sample_act = (
             torch.distributions.uniform.Uniform(-1, 1)
             .sample((self.n_particles, self.action_dim))
             .to(device)
         )
-        sample_obs, sample_act = get_sa_pairs(obs, sample_act)
-        sf = self.get_target_sf(sample_obs, sample_act)
+        sample_obs, sample_act, sample_h = get_sah_pairs(obs, sample_act, h)
+        sf = self.get_target_sf(sample_obs, sample_act, sample_h)
         return sf, sample_obs, sample_act
 
     def log_mean_exp(self, val):
@@ -509,11 +477,11 @@ class SFGPIAgent(MultiTaskAgent):
         return loss
 
     def calc_priority_error(self, batch):
-        (obs, features, act, _, next_obs, dones) = batch
+        (obs, features, act, _, next_obs, dones, h_in0, h_out0, h_in1, h_out1) = batch
 
         with torch.no_grad():
-            cur_sf = self.get_cur_sf(obs, act)
-            target_sf, _ = self.calc_td_target(features, next_obs, dones)
+            cur_sf = self.get_cur_sf(obs, act, h_in1)
+            target_sf, _ = self.calc_td_target(features, next_obs, dones, h_in0, h_out1)
             error = torch.sum(torch.abs(cur_sf - target_sf), 1).item()
         return error
 
@@ -910,7 +878,7 @@ if __name__ == "__main__":
 
     Agent = SFGPIAgent  # SFGPIAgent, TEACHER_SFGPI
 
-    env = "myInvertedDoublePendulum-v4"  # "multitask-v0", "myInvertedDoublePendulum-v4"
+    env = "multitask-v0"  # "multitask-v0", "myInvertedDoublePendulum-v4"
     render = True
     auto_start_simulation = False
     if auto_start_simulation:
@@ -956,9 +924,9 @@ if __name__ == "__main__":
             evaluate_episodes=3,
             updates_per_step=3,
             multi_step=2,
-            min_batch_size=int(128),  # 256
-            min_n_experience=int(1000),  # 0 if enable_tsf else 2048
-            # min_n_experience=int(min_n_experience),  # 0 if enable_tsf else 2048
+            min_batch_size=int(128),  # 128
+            # min_n_experience=int(256),  # 0 if enable_tsf else 2048
+            min_n_experience=int(min_n_experience),  # 0 if enable_tsf else 2048
             total_timesteps=1e5,  # 1e6
             train_nround=5,  # 5
             entropy_tuning=False,

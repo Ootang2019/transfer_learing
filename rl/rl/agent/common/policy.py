@@ -168,7 +168,68 @@ class MultiheadGaussianPolicy(GaussianPolicy):
     ):
         super().__init__(observation_dim, action_dim, sizes, squash, activation)
 
-        self.lstm = torch.nn.LSTM(self.sizes[0], self.sizes[0])
+        self.n_heads = n_heads
+        self.head_ls = []
+        for _ in range(n_heads):
+            self._add_head(self.sizes[1], self.action_dim)
+        self._update_heads()
+
+    def forward(self, obs, head_idx):
+        x = self._forward_hidden(obs)
+        means, actions, entropy = self._forward(x, head_idx)
+        return actions, entropy, torch.tanh(means)
+
+    def forward_heads(self, obs):
+        actions, entropies, mean_actions = [], [], []
+        x = self._forward_hidden(obs)
+        for i in range(self.n_heads):
+            mean_act, act, ent = self._forward(x, i)
+            mean_act = torch.tanh(mean_act)
+
+            actions.append(act)
+            entropies.append(ent)
+            mean_actions.append(mean_act)
+
+        return torch.stack(actions), torch.stack(entropies), torch.stack(mean_actions)
+
+    def _forward(self, x, idx):
+        x = self.heads[idx](x)
+        x = self.tanh(x) if self.squash else x
+        return super()._forward(x)
+
+    def _forward_hidden(self, obs):
+        x = self.activ(self.fc1(obs))
+        x = self.activ(self.fc2(x))
+        return x
+
+    def add_heads(self, output_size):
+        self._add_head(self.sizes[1], output_size)
+        self._update_heads()
+        head_idx = len(self.head_ls)
+        return head_idx
+
+    def _add_head(self, input_size, output_size):
+        head = nn.Linear(input_size, output_size)
+        nn.init.xavier_uniform_(head.weight, 0.0001)
+        self.head_ls.append(head)
+
+    def _update_heads(self):
+        self.heads = nn.ModuleList(self.head_ls)
+
+
+class MultiheadGaussianRNNPolicy(GaussianPolicy):
+    def __init__(
+        self,
+        observation_dim,
+        action_dim,
+        n_heads,
+        sizes=[256, 256],
+        squash=True,
+        activation=nn.SiLU,
+    ):
+        super().__init__(observation_dim, action_dim, sizes, squash, activation)
+
+        self.rnn = torch.nn.GRU(self.sizes[0], self.sizes[0], 1, batch_first=True)
 
         self.n_heads = n_heads
         self.head_ls = []
@@ -177,19 +238,16 @@ class MultiheadGaussianPolicy(GaussianPolicy):
         self._update_heads()
 
     def forward(self, obs, hidden, head_idx):
-        x, hidden_out = self._forward_hidden(obs, hidden)
-        x = self.heads[head_idx](x)
-        x = self.tanh(x) if self.squash else x
-        means, actions, entropy = self._forward(x)
-        return actions, entropy, torch.tanh(means), hidden_out
+        x, hidden_rnn = self._forward_hidden(obs, hidden)
+        means, actions, entropy = self._forward(x, head_idx)
+        return actions, entropy, torch.tanh(means), hidden_rnn
 
     def forward_heads(self, obs, hidden):
         actions, entropies, mean_actions = [], [], []
-        hidden_x, hidden_lstm = self._forward_hidden(obs, hidden)
+        x, hidden_rnn = self._forward_hidden(obs, hidden)
         for i in range(self.n_heads):
-            x = self.heads[i](hidden_x)
-            x = self.tanh(x) if self.squash else x
-            mean_act, act, ent = self._forward(x)
+            mean_act, act, ent = self._forward(x, i)
+            mean_act = torch.tanh(mean_act)
 
             actions.append(act)
             entropies.append(ent)
@@ -199,14 +257,21 @@ class MultiheadGaussianPolicy(GaussianPolicy):
             torch.stack(actions),
             torch.stack(entropies),
             torch.stack(mean_actions),
-            hidden_lstm,
+            hidden_rnn,
         )
+
+    def _forward(self, x, i):
+        x = self.heads[i](x)
+        x = self.tanh(x) if self.squash else x
+        return super()._forward(x)
 
     def _forward_hidden(self, obs, hidden):
         x = self.activ(self.fc1(obs))
-        x, hidden_out = self.lstm(x, hidden)
+        x = x.view(-1, 1, self.sizes[0])
+
+        x, hidden_rnn = self.rnn(x, hidden)
         x = self.activ(self.fc2(x))
-        return x, hidden_out
+        return x, hidden_rnn
 
     def add_heads(self, output_size):
         self._add_head(self.sizes[1], output_size)

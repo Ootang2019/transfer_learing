@@ -8,8 +8,19 @@ import torch
 import wandb
 from rltorch.memory import MultiStepMemory
 
-from agent.common.replay_buffer import MyMultiStepMemory, MyPrioritizedMemory
-from agent.common.util import check_dim, check_output_action, np2ts, to_batch, ts2np
+from agent.common.replay_buffer import (
+    MyMultiStepMemory,
+    MyPrioritizedMemory,
+    MyPrioritizedRNNMemory,
+)
+from agent.common.util import (
+    check_dim,
+    check_output_action,
+    np2ts,
+    ts2np,
+    to_batch,
+    to_batch_rnn,
+)
 
 warnings.simplefilter("once", UserWarning)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -276,7 +287,6 @@ class MultiTaskAgent(BasicAgent):
         episode_steps = 0
         done = False
         obs, feature = self.reset_env()
-
         while not done:
             self.render_env()
 
@@ -544,3 +554,233 @@ class MultiTaskAgent(BasicAgent):
         print("current task", self.task_idx)
         print("switch next task at", next_task_step)
         return self.steps >= next_task_step
+
+
+class MultiTaskRNNAgent(MultiTaskAgent):
+    def __init__(
+        self,
+        env: str,
+        env_kwargs: dict = {},
+        rnn_hidden_shape0=64,
+        rnn_hidden_shape1=64,
+        total_timesteps=1000000,
+        reward_scale: float = 1,
+        replay_buffer_size: int = 1000000,
+        gamma: float = 0.99,
+        multi_step: int = 1,
+        prioritized_memory: bool = False,
+        alpha: float = 0.6,
+        beta: float = 0.4,
+        beta_annealing: float = 0.0001,
+        mini_batch_size: int = 128,
+        min_n_experience: int = 1024,
+        updates_per_step: int = 1,
+        train_nround: int = 3,
+        render: bool = False,
+        log_interval=10,
+        eval=True,
+        eval_interval=10,
+        evaluate_episodes=10,
+        task_schedule=None,
+        enable_curriculum_learning=False,
+        seed=0,
+        **kwargs,
+    ):
+        super().__init__(
+            env,
+            env_kwargs,
+            total_timesteps,
+            reward_scale,
+            replay_buffer_size,
+            gamma,
+            multi_step,
+            prioritized_memory,
+            alpha,
+            beta,
+            beta_annealing,
+            mini_batch_size,
+            min_n_experience,
+            updates_per_step,
+            train_nround,
+            render,
+            log_interval,
+            eval,
+            eval_interval,
+            evaluate_episodes,
+            task_schedule,
+            enable_curriculum_learning,
+            seed,
+            **kwargs,
+        )
+        self.rnn_hidden_shape0 = rnn_hidden_shape0
+        self.rnn_hidden_shape1 = rnn_hidden_shape1
+        self.init_rnn_hidden0 = torch.zeros(
+            [1, 1, self.rnn_hidden_shape0], dtype=torch.float
+        ).to(device)
+        self.init_rnn_hidden1 = torch.zeros(
+            [1, 1, self.rnn_hidden_shape1], dtype=torch.float
+        ).to(device)
+
+        self.replay_buffer = MyPrioritizedRNNMemory(
+            int(self.replay_buffer_size),
+            self.env.observation_space.shape,
+            self.env.feature_space.shape,
+            self.env.action_space.shape,
+            (self.rnn_hidden_shape0,),
+            (self.rnn_hidden_shape1,),
+            device,
+            self.gamma,
+            self.multi_step,
+            alpha=alpha,
+            beta=beta,
+            beta_annealing=beta_annealing,
+        )
+
+    def train_episode(self):
+        if self.task_schedule is not None:
+            self.change_task()
+
+        episode_reward = 0
+        self.episodes += 1
+        episode_steps = 0
+        done = False
+        obs, feature = self.reset_env()
+        h_in0 = self.init_rnn_hidden0
+        h_in1 = self.init_rnn_hidden1
+
+        while not done:
+            self.render_env()
+
+            action, h_out0, h_out1 = self.act(obs, h_in0, h_in1)
+            next_obs, reward, done, info = self.env.step(action)
+            next_feature = info["features"]
+            masked_done = False if episode_steps >= self.max_episode_steps else done
+
+            self.steps += 1
+            episode_steps += 1
+            episode_reward += reward
+
+            self.save_to_buffer(
+                done,
+                obs,
+                feature,
+                action,
+                next_obs,
+                reward,
+                masked_done,
+                h_in0,
+                h_out0,
+                h_in1,
+                h_out1,
+            )
+            if self.is_update():
+                for _ in range(self.updates_per_step):
+                    self.learn()
+
+            obs = next_obs
+            feature = next_feature
+            h_in0 = h_out0
+            h_in1 = h_out1
+
+        if self.episodes % self.log_interval == 0:
+            self.log_training(episode_reward, episode_steps, info)
+
+        if self.eval and (self.episodes % self.eval_interval == 0):
+            self.evaluate()
+
+        self.post_episode_process()
+
+    def save_to_buffer(
+        self,
+        done,
+        obs,
+        feature,
+        action,
+        next_obs,
+        reward,
+        masked_done,
+        h_in0,
+        h_out0,
+        h_in1,
+        h_out1,
+    ):
+        batch = to_batch_rnn(
+            obs,
+            feature,
+            action,
+            reward,
+            next_obs,
+            masked_done,
+            h_in0,
+            h_out0,
+            h_in1,
+            h_out1,
+            device,
+        )
+        error = self.calc_priority_error(batch)
+        self.replay_buffer.append(
+            obs,
+            feature,
+            action,
+            reward,
+            next_obs,
+            masked_done,
+            h_in0,
+            h_out0,
+            h_in1,
+            h_out1,
+            error,
+            done,
+        )
+
+    def evaluate(self):
+        episodes = self.evaluate_episodes
+        if episodes == 0:
+            return
+
+        returns = np.zeros((episodes,), dtype=np.float32)
+        success = 0
+
+        h_in0 = self.init_rnn_hidden0
+        h_in1 = self.init_rnn_hidden1
+
+        for i in range(episodes):
+            obs, info = self.reset_env()
+            episode_reward = 0.0
+            done = False
+            while not done:
+                action, h_out0, h_out1 = self.act(obs, h_in0, h_in1, "exploit")
+                next_obs, reward, done, info = self.env.step(action)
+                episode_reward += reward
+                obs = next_obs
+                h_in0 = h_out0
+                h_in1 = h_out1
+
+            returns[i] = episode_reward
+            success += int(self.is_success(info))
+
+        self.log_evaluation(episodes, returns, success)
+
+    def act(self, obs, h_in0, h_in1, mode="explore"):
+        if self.start_steps > self.steps:
+            action = self.env.action_space.sample()
+            h_out0 = self.init_rnn_hidden0
+            h_out1 = self.init_rnn_hidden1
+        else:
+            action, h_out0, h_out1 = self.get_action(obs, h_in0, h_in1, mode)
+
+        action = check_output_action(action, self.action_dim)
+        return action, h_out0, h_out1
+
+    def get_action(self, obs, h_in0, h_in1, mode):
+        obs, w = np2ts(obs), np2ts(self.w)
+        obs = check_dim(obs, self.observation_dim)
+
+        with torch.no_grad():
+            if mode == "explore":
+                act_ts, h_out0, h_out1 = self.explore(obs, h_in0, h_in1, w)
+            elif mode == "exploit":
+                act_ts, h_out0, h_out1 = self.exploit(obs, h_in0, h_in1, w)
+
+        act = ts2np(act_ts)
+        return act, h_out0, h_out1

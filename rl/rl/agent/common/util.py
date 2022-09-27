@@ -37,6 +37,16 @@ def get_sa_pairs(s: torch.tensor, a: torch.tensor) -> Tuple[torch.tensor, torch.
     return s_tile, a_tile
 
 
+def get_sah_pairs(
+    s: torch.tensor, a: torch.tensor, h: torch.tensor
+) -> Tuple[torch.tensor, torch.tensor, torch.tensor]:
+    n_samples = a.shape[0]
+
+    s_tile, a_tile = get_sa_pairs(s, a)
+    h_tile = torch.tile(h, (n_samples, 1))
+    return s_tile, a_tile, h_tile
+
+
 def get_sa_pairs_(
     s: torch.tensor, a: torch.tensor
 ) -> Tuple[torch.tensor, torch.tensor]:
@@ -143,6 +153,36 @@ def to_batch(
     next_state = torch.FloatTensor(next_state).unsqueeze(0).to(device)
     done = torch.FloatTensor([done]).unsqueeze(0).to(device)
     return state, feature, action, reward, next_state, done
+
+
+def to_batch_rnn(
+    state,
+    feature,
+    action,
+    reward,
+    next_state,
+    done,
+    h_in0,
+    h_out0,
+    h_in1,
+    h_out1,
+    device,
+):
+    state, feature, action, reward, next_state, done = to_batch(
+        state, feature, action, reward, next_state, done, device
+    )
+    return (
+        state,
+        feature,
+        action,
+        reward,
+        next_state,
+        done,
+        h_in0,
+        h_out0,
+        h_in1,
+        h_out1,
+    )
 
 
 def update_params(optim, network, loss, grad_clip=None, retain_graph=False):
